@@ -1,0 +1,17 @@
+{
+  "name": "Default derivation policy",
+  "description": "Operator-supplied default bounds for constrainable arguments. `Operation.constrainable` in the catalog says WHICH arguments must be bounded; this file says WHAT the bound is when the task statement itself names no value. That is a business decision, so it lives here rather than in broker/derive.py, which knows nothing about what these operations mean. Keyed operation -> argument -> bound, where a bound is any subset of Constraint's fields (lte, gte, eq, one_of). broker/derive.py loads this path when WARRANT_DERIVATION_POLICY is unset; set that variable (os.pathsep-separated paths, later files win) to point somewhere else, or to \"\" for no defaults at all. Entries for operations that are not currently registered are inert and skipped, so one file can cover several manifests. A constrainable argument with no entry here and no value in the task statement is NOT granted: derivation drops the whole grant and says so, rather than signing an unbounded argument.",
+
+  "defaults": {
+    "refunds.create": {
+      "amount": { "lte": 5000 }
+    },
+
+    "helpdesk.vpn.grant": {
+      "duration_hours": { "lte": 8 }
+    },
+    "helpdesk.laptops.provision": {
+      "budget_inr": { "lte": 120000 }
+    }
+  }
+}

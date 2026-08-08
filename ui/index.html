@@ -1,0 +1,978 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Warrant — scope diff &amp; live audit</title>
+<!-- Inline, so the browser never requests /favicon.ico and the broker never 404s.
+     Keeps the console clean on stage. No external file, no CDN. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2305080e'/%3E%3Cpath d='M16 4l10 4v8c0 6.2-4.2 10.6-10 12-5.8-1.4-10-5.8-10-12V8z' fill='none' stroke='%2321e06b' stroke-width='2.5'/%3E%3C/svg%3E">
+<style>
+  /* ---------- tokens ---------- */
+  :root{
+    --bg:        #05080e;
+    --panel:     #0b1017;
+    --panel-2:   #0e141d;
+    --line:      #1d2735;
+    --line-soft: #151d28;
+
+    --text:      #e9f0f9;
+    --text-2:    #9fb0c6;
+    --wall:      #6d7f97;   /* the greyed-out wall */
+    --wall-mut:  #9c5f68;   /* mutating op inside the wall */
+
+    --green:     #21e06b;
+    --green-bg:  rgba(33,224,107,.13);
+    --red:       #ff3d49;
+    --red-bg:    rgba(255,61,73,.16);
+    --amber:     #ffb020;
+    --amber-bg:  rgba(255,176,32,.14);
+    --cyan:      #4dd2ff;
+
+    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", "Courier New", monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+
+  *{ box-sizing:border-box; }
+  html,body{ height:100%; margin:0; }
+  html{ font-size: clamp(15px, 0.92vw, 23px); }
+  body{
+    background:var(--bg); color:var(--text);
+    font-family:var(--sans);
+    font-size:1rem; line-height:1.35;
+    overflow:hidden;
+    -webkit-font-smoothing:antialiased;
+  }
+
+  /* ---------- shell ---------- */
+  #shell{
+    height:100vh; width:100vw;
+    display:grid;
+    grid-template-columns: minmax(0, 44fr) minmax(0, 56fr);
+    gap:0.5rem; padding:0.5rem;
+  }
+  .panel{
+    background:var(--panel);
+    border:2px solid var(--line);
+    border-radius:.5rem;
+    display:flex; flex-direction:column;
+    min-width:0; min-height:0; overflow:hidden;
+  }
+  .panel > header{
+    flex:0 0 auto;
+    padding:.55rem .8rem;
+    border-bottom:2px solid var(--line);
+    background:var(--panel-2);
+    display:flex; align-items:center; gap:.7rem; flex-wrap:wrap;
+  }
+  .panel h1{
+    margin:0; font-size:1.25rem; font-weight:800;
+    letter-spacing:.14em; text-transform:uppercase;
+  }
+  .panel h1 .dotmark{ color:var(--cyan); }
+  .sub{ font-size:.72rem; letter-spacing:.16em; text-transform:uppercase; color:var(--text-2); font-weight:700; }
+  .spacer{ flex:1 1 auto; }
+
+  /* ---------- LEFT: scope diff ---------- */
+  #taskline{
+    flex:0 0 auto;
+    padding:.5rem .8rem;
+    border-bottom:2px solid var(--line-soft);
+    font-family:var(--mono); font-size:.82rem; color:var(--text-2);
+    line-height:1.3;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+  }
+  #taskline b{ color:var(--cyan); font-weight:700; letter-spacing:.08em; }
+  #taskline .task-text{ color:var(--text); }
+
+  #diff{
+    flex:1 1 auto; min-height:0;
+    display:grid;
+    grid-template-columns: minmax(0,1fr) minmax(0,1.08fr);
+    gap:0;
+  }
+  #diff.no-warrant{ grid-template-columns: minmax(0,1fr); }
+  #diff.no-warrant #col-warrant{ display:none; }
+
+  .col{ min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
+  .col + .col{ border-left:2px solid var(--line); }
+  .col > .colhead{
+    flex:0 0 auto; padding:.5rem .7rem .4rem;
+    border-bottom:1px solid var(--line-soft);
+  }
+  .colhead .kicker{ font-size:.68rem; letter-spacing:.18em; text-transform:uppercase; color:var(--text-2); font-weight:700; }
+  .colhead .title{ font-size:1.02rem; font-weight:800; margin-top:.1rem; }
+  #col-surface .colhead .title{ color:var(--wall); }
+  #col-warrant .colhead .title{ color:var(--green); }
+  .colhead .count{ font-family:var(--mono); font-size:.75rem; color:var(--text-2); margin-top:.15rem; }
+
+  .scroll{ flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; padding:.45rem .7rem .8rem; }
+  .scroll::-webkit-scrollbar{ width:8px; }
+  .scroll::-webkit-scrollbar-thumb{ background:#243040; border-radius:4px; }
+  .scroll::-webkit-scrollbar-track{ background:transparent; }
+
+  /* the wall */
+  .wallitem{
+    border-left:3px solid #2b3646;
+    padding:.24rem 0 .34rem .5rem;
+    margin-bottom:.5rem;
+    color:var(--wall);
+  }
+  .wallitem.mut{ border-left-color:var(--wall-mut); }
+  .wallitem .wop{
+    font-family:var(--mono); font-size:1.04rem; font-weight:700;
+    text-decoration:line-through; text-decoration-thickness:2px;
+  }
+  .wallitem.mut .wop{ color:var(--wall-mut); }
+  .wallitem .wtag{
+    font-size:.6rem; font-weight:800; letter-spacing:.13em;
+    border:1px solid var(--wall-mut); color:var(--wall-mut);
+    padding:0 .28rem; border-radius:.18rem; margin-left:.35rem;
+    vertical-align:.09em; text-decoration:none; white-space:nowrap;
+  }
+  .wallitem .wmeta{
+    font-family:var(--mono); font-size:.76rem;
+    text-decoration:line-through; text-decoration-thickness:1px;
+    opacity:.86; margin-top:.08rem;
+  }
+  .wallitem .wmeta span{ margin-right:.7rem; white-space:nowrap; }
+  .wallitem .wargs{
+    font-family:var(--mono); font-size:.72rem; opacity:.7; margin-top:.05rem;
+    text-decoration:line-through; text-decoration-thickness:1px;
+  }
+  #wallfoot{
+    margin-top:.5rem; padding-top:.45rem; border-top:1px dashed #2b3646;
+    font-family:var(--mono); font-size:.74rem; color:var(--wall);
+  }
+
+  /* TTL */
+  #ttlbox{
+    flex:0 0 auto; margin:.45rem .7rem .1rem;
+    border:2px solid var(--green); border-radius:.4rem;
+    background:var(--green-bg); padding:.35rem .6rem .45rem;
+  }
+  #ttlbox.warn{ border-color:var(--amber); background:var(--amber-bg); }
+  #ttlbox.crit{ border-color:var(--red); background:var(--red-bg); }
+  #ttlbox.dead{ border-color:var(--red); background:var(--red-bg); }
+  #ttlbox .ttllabel{ font-size:.66rem; letter-spacing:.18em; text-transform:uppercase; color:var(--text-2); font-weight:700; }
+  #ttlclock{
+    font-family:var(--mono); font-size:2.05rem; font-weight:800; line-height:1.05;
+    color:var(--green); font-variant-numeric:tabular-nums; letter-spacing:.02em;
+  }
+  #ttlbox.warn #ttlclock{ color:var(--amber); }
+  #ttlbox.crit #ttlclock, #ttlbox.dead #ttlclock{ color:var(--red); }
+  #ttlbar{ height:6px; background:#122132; border-radius:3px; overflow:hidden; margin-top:.28rem; }
+  #ttlfill{ height:100%; width:100%; background:var(--green); transition:width .12s linear; }
+  #ttlbox.warn #ttlfill{ background:var(--amber); }
+  #ttlbox.crit #ttlfill, #ttlbox.dead #ttlfill{ background:var(--red); }
+
+  /* bright grants */
+  .grant{
+    border:2px solid var(--green);
+    border-left-width:8px;
+    border-radius:.35rem;
+    background:var(--green-bg);
+    padding:.35rem .55rem .45rem;
+    margin-bottom:.5rem;
+  }
+  .grant.wild{ border-color:var(--amber); background:var(--amber-bg); }
+  .grant .gop{
+    font-family:var(--mono); font-size:1.12rem; font-weight:800; color:var(--green);
+    word-break:break-word;
+  }
+  .grant.wild .gop{ color:var(--amber); }
+  .grant .gbadge{
+    display:inline-block; font-size:.6rem; font-weight:900; letter-spacing:.13em;
+    background:var(--amber); color:#1b1200; padding:.05rem .3rem; border-radius:.18rem;
+    margin-left:.4rem; vertical-align:.13em; white-space:nowrap;
+  }
+  .grant .grow{ display:flex; gap:.45rem; font-family:var(--mono); font-size:.8rem; margin-top:.16rem; align-items:baseline; }
+  .grant .gk{ color:var(--text-2); flex:0 0 5.2rem; text-transform:uppercase; font-size:.66rem; letter-spacing:.1em; font-weight:700; }
+  .grant .gv{ color:var(--text); font-weight:700; word-break:break-word; }
+  .grant .gv.none{ color:var(--text-2); font-weight:400; }
+  .grant .gv .spent{ color:var(--text-2); font-weight:400; }
+  /* Spent budget is not a failure -- the authority was used as intended. Dim it,
+     don't redden it, or three used grants read as three denials from the back row. */
+  .grant.exhausted{ opacity:.82; }
+  .grant.exhausted .gv.budget{ color:var(--amber); }
+  .grant .gjust{
+    margin-top:.28rem; font-size:.74rem; color:var(--text-2);
+    font-style:italic; line-height:1.3;
+    border-top:1px solid rgba(255,255,255,.08); padding-top:.22rem;
+  }
+
+  /* empty states */
+  .empty{
+    margin:.5rem 0; padding:.7rem .8rem;
+    border:2px dashed #2b3646; border-radius:.4rem;
+    color:var(--text-2);
+  }
+  .empty .etitle{ color:var(--text); font-weight:800; font-size:.98rem; margin-bottom:.3rem; letter-spacing:.02em; }
+  .empty .estep{ font-family:var(--mono); font-size:.78rem; margin:.16rem 0; }
+  .empty .estep i{ color:var(--cyan); font-style:normal; font-weight:700; }
+  .empty .enote{ font-size:.76rem; margin-top:.4rem; line-height:1.35; }
+
+  /* ---------- RIGHT: audit ---------- */
+  #conn{
+    display:flex; align-items:center; gap:.35rem;
+    font-size:.68rem; letter-spacing:.14em; text-transform:uppercase; font-weight:800;
+    border:1px solid var(--line); border-radius:1rem; padding:.12rem .5rem .12rem .4rem;
+  }
+  #conndot{ width:.62rem; height:.62rem; border-radius:50%; background:var(--amber); box-shadow:0 0 .5rem currentColor; }
+  #conn.live #conndot{ background:var(--green); animation:pulse 2s ease-in-out infinite; }
+  #conn.down #conndot{ background:var(--red); }
+  #conn.live{ color:var(--green); border-color:rgba(33,224,107,.4); }
+  #conn.down{ color:var(--red);   border-color:rgba(255,61,73,.5); }
+  #conn.wait{ color:var(--amber); border-color:rgba(255,176,32,.45); }
+  @keyframes pulse{ 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  .tally{ font-family:var(--mono); font-size:.8rem; font-weight:800; }
+  .tally .ta{ color:var(--green); }
+  .tally .td{ color:var(--red); }
+  .tally .tc{ color:var(--cyan); }
+  .tally .sep{ color:var(--line); margin:0 .3rem; }
+
+  .arow{
+    display:grid;
+    grid-template-columns: 6.2rem 9.6rem 8.4rem 5.6rem minmax(0,1fr);
+    gap:.55rem;
+    align-items:start;
+  }
+  #audithead{
+    flex:0 0 auto;
+    padding:.3rem .8rem .3rem;
+    border-bottom:2px solid var(--line);
+    background:var(--panel-2);
+    font-size:.64rem; letter-spacing:.17em; text-transform:uppercase;
+    color:var(--text-2); font-weight:800;
+  }
+  #auditlist{ flex:1 1 auto; min-height:0; overflow-y:auto; padding:.4rem .8rem 1rem; }
+  #auditlist::-webkit-scrollbar{ width:8px; }
+  #auditlist::-webkit-scrollbar-thumb{ background:#243040; border-radius:4px; }
+
+  .entry{
+    padding:.4rem .5rem .45rem;
+    border-radius:.3rem;
+    border-left:8px solid transparent;
+    margin-bottom:.4rem;
+    font-family:var(--mono);
+    font-size:.86rem;
+  }
+  .entry .c-time{ color:var(--text-2); font-size:.8rem; font-variant-numeric:tabular-nums; }
+  .entry .c-op{ font-weight:800; word-break:break-word; }
+  .entry .c-res{ color:var(--text); word-break:break-word; }
+  .entry .c-dec{ font-weight:900; letter-spacing:.09em; }
+  .entry .c-reason{ line-height:1.35; word-break:break-word; }
+
+  .entry.allow{ background:var(--green-bg); border-left-color:var(--green); }
+  .entry.allow .c-op{ color:#bff5d5; }
+  .entry.allow .c-dec{ color:var(--green); }
+  .entry.allow .c-reason{ color:#cfe6da; }
+
+  .entry.deny{
+    background:var(--red-bg);
+    border:2px solid var(--red); border-left-width:10px;
+    font-size:1.02rem;
+    padding:.55rem .6rem .6rem;
+    box-shadow:0 0 1.4rem rgba(255,61,73,.3);
+  }
+  .entry.deny .c-op{ color:#ffd7da; }
+  .entry.deny .c-res{ color:#fff; font-weight:800; }
+  .entry.deny .c-dec{ color:#fff; background:var(--red); border-radius:.2rem; padding:.05rem .3rem; text-align:center; }
+  .entry.deny .c-reason{ color:#ffe3e5; font-weight:700; }
+  .entry.deny .c-time{ color:#ffb3b8; }
+  .entry.flash{ animation:denyflash 1.1s cubic-bezier(.2,.7,.3,1) 1; }
+  @keyframes denyflash{
+    0%   { background:#ff3d49; box-shadow:0 0 0 .7rem rgba(255,61,73,.55); }
+    12%  { background:#ff3d49; box-shadow:0 0 0 .7rem rgba(255,61,73,.55); }
+    100% { background:var(--red-bg); box-shadow:0 0 1.4rem rgba(255,61,73,.3); }
+  }
+  .entry.allow.flash{ animation:allowflash .8s ease-out 1; }
+  @keyframes allowflash{
+    0%{ background:rgba(33,224,107,.55); }
+    100%{ background:var(--green-bg); }
+  }
+
+  /* Control-plane lifecycle rows (mint / delegate / release / close / revoke /
+     catalog.register). Same log, different meaning: nothing reached an upstream,
+     so they must not look like ALLOWs and must not put a task id in "resource". */
+  .entry.ctrl{
+    background:rgba(77,210,255,.10);
+    border-left-color:var(--cyan);
+    border:1px solid rgba(77,210,255,.28); border-left-width:8px;
+  }
+  .entry.ctrl .c-op{ color:#b8ecff; }
+  .entry.ctrl .c-res{ color:var(--cyan); font-weight:700; }
+  .entry.ctrl .c-dec{
+    color:#041018; background:var(--cyan); border-radius:.2rem;
+    padding:.05rem .3rem; text-align:center; font-size:.72rem;
+  }
+  .entry.ctrl .c-reason{ color:#cfe8f3; }
+  .entry.ctrl .c-time{ color:#8ec8de; }
+  .entry.ctrl.deny{
+    background:var(--red-bg);
+    border:2px solid var(--red); border-left-width:10px;
+    box-shadow:0 0 1.1rem rgba(255,61,73,.22);
+  }
+  .entry.ctrl.deny .c-op{ color:#ffd7da; }
+  .entry.ctrl.deny .c-res{ color:#fff; }
+  .entry.ctrl.deny .c-dec{ color:#fff; background:var(--red); }
+  .entry.ctrl.deny .c-reason{ color:#ffe3e5; font-weight:700; }
+  .entry.ctrl.flash{ animation:ctrlflash .7s ease-out 1; }
+  @keyframes ctrlflash{
+    0%{ background:rgba(77,210,255,.42); }
+    100%{ background:rgba(77,210,255,.10); }
+  }
+  .entry.ctrl.deny.flash{ animation:denyflash 1.1s cubic-bezier(.2,.7,.3,1) 1; }
+
+  .entry .c-args{
+    grid-column:5 / 6;
+    color:var(--text-2); font-size:.72rem; margin-top:.2rem;
+    word-break:break-word;
+  }
+
+  /* Delegation lineage on the warrant panel */
+  .lineage{
+    border:2px solid rgba(77,210,255,.35);
+    border-left-width:8px;
+    border-radius:.35rem;
+    background:rgba(77,210,255,.08);
+    padding:.4rem .55rem .45rem;
+    margin-bottom:.55rem;
+    font-family:var(--mono);
+  }
+  .lineage .lrow{
+    display:flex; flex-wrap:wrap; gap:.35rem .55rem; align-items:baseline;
+    font-size:.78rem; color:var(--text);
+  }
+  .lineage .lrow + .lrow{ margin-top:.22rem; }
+  .lineage .ltag{
+    display:inline-block; font-size:.58rem; font-weight:900; letter-spacing:.12em;
+    text-transform:uppercase; padding:.04rem .28rem; border-radius:.18rem;
+    background:var(--cyan); color:#041018; vertical-align:.08em;
+  }
+  .lineage .ltag.del{ background:var(--amber); color:#1b1200; }
+  .lineage .ltag.sealed{ background:#2a3a50; color:var(--text-2); }
+  .lineage .ltag.closed{ background:var(--red); color:#fff; }
+  .lineage .lk{ color:var(--text-2); font-size:.66rem; letter-spacing:.08em; text-transform:uppercase; font-weight:700; }
+  .lineage .lv{ color:var(--text); font-weight:700; word-break:break-word; }
+  .lineage .lparent{ color:var(--cyan); }
+</style>
+</head>
+<body>
+
+<div id="shell">
+
+  <!-- ============ LEFT ============ -->
+  <section class="panel" id="left">
+    <header>
+      <h1>Scope <span class="dotmark">diff</span></h1>
+      <div class="spacer"></div>
+      <div class="sub" id="left-sub">what a key grants &nbsp;vs&nbsp; what this warrant grants</div>
+    </header>
+
+    <div id="taskline"><b>TASK</b> &nbsp;<span class="task-text" id="task-text">— no warrant minted yet —</span></div>
+
+    <div id="diff">
+      <div class="col" id="col-surface">
+        <div class="colhead">
+          <div class="kicker">Baseline</div>
+          <div class="title">What an API key grants</div>
+          <div class="count" id="surface-count">loading catalog…</div>
+        </div>
+        <div class="scroll" id="wall"></div>
+      </div>
+
+      <div class="col" id="col-warrant">
+        <div class="colhead">
+          <div class="kicker">Derived, signed, expiring</div>
+          <div class="title">What this warrant grants</div>
+          <div class="count" id="warrant-count">no active warrant</div>
+        </div>
+
+        <div id="ttlbox" style="display:none">
+          <div class="ttllabel">expires in</div>
+          <div id="ttlclock">--:--</div>
+          <div id="ttlbar"><div id="ttlfill"></div></div>
+        </div>
+
+        <div class="scroll" id="grants"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ RIGHT ============ -->
+  <section class="panel" id="right">
+    <header>
+      <h1>Live <span class="dotmark">audit</span></h1>
+      <div class="spacer"></div>
+      <div class="tally" id="tally"><span class="ta" id="n-allow">0 ALLOW</span><span class="sep">|</span><span class="td" id="n-deny">0 DENY</span><span class="sep">|</span><span class="tc" id="n-ctrl">0 ctrl</span></div>
+      <div id="conn" class="wait"><span id="conndot"></span><span id="conntext">connecting</span></div>
+    </header>
+
+    <div id="audithead" class="arow">
+      <div>time</div><div>op</div><div>resource</div><div>decision</div><div>reason</div>
+    </div>
+
+    <div id="auditlist"></div>
+  </section>
+
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // Served from the broker at "/", so relative URLs. If someone opens the file
+  // directly off disk, fall back to the broker's loopback address.
+  var API = (location.protocol === "file:" || !location.host) ? "http://127.0.0.1:8100" : "";
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function esc(s) {
+    return String(s === null || s === undefined ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function getJSON(path) {
+    return fetch(API + path, { cache: "no-store" }).then(function (r) {
+      if (!r.ok) { var e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
+      return r.json();
+    });
+  }
+
+  /* =====================================================================
+     LEFT PANEL — the wall
+     ===================================================================== */
+
+  var catalogLoaded = false;
+
+  function renderWall(surface, argsByOp) {
+    var wall = $("wall");
+    var mutating = 0;
+    var html = "";
+    for (var i = 0; i < surface.length; i++) {
+      var row = surface[i] || {};
+      var isMut = !!row.mutating;
+      if (isMut) mutating++;
+      var argNames = argsByOp[row.op] || [];
+      html +=
+        '<div class="wallitem' + (isMut ? " mut" : "") + '">' +
+          '<div class="wop">' + esc(row.op) +
+            (isMut ? '<span class="wtag">MUTATING</span>' : "") +
+          '</div>' +
+          '<div class="wmeta">' +
+            '<span>' + esc(row.resource !== undefined ? row.resource : "* (any)") + '</span>' +
+            '<span>constraints: ' + esc(row.constraints !== undefined ? row.constraints : "none") + '</span>' +
+            '<span>uses: ' + esc(row.uses !== undefined ? row.uses : "unlimited") + '</span>' +
+          '</div>' +
+          (argNames.length
+            ? '<div class="wargs">' + esc(argNames.join(", ")) + " — any value</div>"
+            : "") +
+        '</div>';
+    }
+    html += '<div id="wallfoot">no expiry &nbsp;·&nbsp; no resource binding &nbsp;·&nbsp; no revocation &nbsp;·&nbsp; one string, forever</div>';
+    wall.innerHTML = html;
+    $("surface-count").textContent =
+      surface.length + " operations · " + mutating + " mutating · unbounded";
+    catalogLoaded = true;
+  }
+
+  function loadCatalog() {
+    getJSON("/catalog").then(function (data) {
+      var ops = (data && data.operations) || [];
+      var argsByOp = {};
+      for (var k = 0; k < ops.length; k++) {
+        argsByOp[ops[k].op] = ops[k].args ? Object.keys(ops[k].args) : [];
+      }
+      var surface = (data && data.full_surface) || [];
+      if (!surface.length && data && data.operations) {
+        // tolerate a broker that only ships `operations`
+        surface = data.operations.map(function (o) {
+          return { op: o.op, resource: "* (any)", constraints: "none", uses: "unlimited", mutating: !!o.mutating };
+        });
+      }
+      renderWall(surface, argsByOp);
+    }).catch(function () {
+      $("surface-count").textContent = "catalog unavailable — retrying…";
+      $("wall").innerHTML =
+        '<div class="empty"><div class="etitle">Waiting for the broker</div>' +
+        '<div class="enote">GET /catalog is not answering on localhost:8100 yet. ' +
+        'This column fills in the moment it does.</div></div>';
+      setTimeout(loadCatalog, 2000);
+    });
+  }
+
+  /* =====================================================================
+     LEFT PANEL — the warrant
+     ===================================================================== */
+
+  var activeWarrant = null;
+  var activeUsed = [];
+  var activeSealed = false;
+  var activeClosed = null;
+  var warrantEndpointMissing = false;
+
+  function shortId(id) {
+    if (!id || id === "-" || id === "?") return "—";
+    var s = String(id);
+    return s.length > 10 ? s.slice(0, 8) : s;
+  }
+
+  function fmtConstraints(c) {
+    if (!c) return null;
+    var keys = Object.keys(c);
+    if (!keys.length) return null;
+    var parts = [];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i], v = c[k] || {}, bits = [];
+      if (v.lte !== null && v.lte !== undefined) bits.push("≤ " + v.lte);
+      if (v.gte !== null && v.gte !== undefined) bits.push("≥ " + v.gte);
+      if (v.eq !== null && v.eq !== undefined) bits.push("= " + v.eq);
+      if (v.one_of !== null && v.one_of !== undefined) bits.push("∈ [" + v.one_of.join(", ") + "]");
+      parts.push(k + " " + (bits.length ? bits.join(" and ") : "(unbounded)"));
+    }
+    return parts.join("  ·  ");
+  }
+
+  function warrantEmptyState() {
+    return '' +
+      '<div class="empty">' +
+        '<div class="etitle">No warrant is active yet.</div>' +
+        '<div class="estep"><i>1.</i> a human writes one task statement</div>' +
+        '<div class="estep"><i>2.</i> it is derived into the fewest grants that task needs</div>' +
+        '<div class="estep"><i>3.</i> each grant is pinned to a resource id, bounded, budgeted, signed</div>' +
+        '<div class="estep"><i>4.</i> it appears here — bright, short, and counting down</div>' +
+        '<div class="enote">Everything on the left of this divider is what a plain API key hands over. ' +
+        'What appears on this side is all the agent will be able to do.</div>' +
+      '</div>';
+  }
+
+  function lineageHtml(w, sealed, closed) {
+    if (!w) return "";
+    var depth = typeof w.depth === "number" ? w.depth : 0;
+    var isDel = !!(w.parent_id) || depth > 0;
+    var html = '<div class="lineage">';
+    html += '<div class="lrow">';
+    html += '<span class="ltag' + (isDel ? " del" : "") + '">' + (isDel ? "delegated" : "root") + '</span>';
+    if (sealed) html += '<span class="ltag sealed">sealed</span>';
+    if (closed) html += '<span class="ltag closed">closed</span>';
+    html += '<span class="lk">agent</span><span class="lv">' + esc(w.agent || "—") + '</span>';
+    html += '<span class="lk">warrant</span><span class="lv">' + esc(shortId(w.warrant_id)) + '</span>';
+    html += '</div>';
+    if (isDel) {
+      html += '<div class="lrow">';
+      html += '<span class="lk">from</span><span class="lv lparent">' + esc(shortId(w.parent_id)) + '</span>';
+      html += '<span class="lk">depth</span><span class="lv">' + esc(String(depth)) + '</span>';
+      html += '<span class="lk">principal</span><span class="lv">' + esc(w.principal || "—") + '</span>';
+      html += '</div>';
+    } else {
+      html += '<div class="lrow">';
+      html += '<span class="lk">principal</span><span class="lv">' + esc(w.principal || "—") + '</span>';
+      html += '<span class="lk">task</span><span class="lv">' + esc(shortId(w.task_id)) + '</span>';
+      html += '</div>';
+    }
+    if (closed) {
+      html += '<div class="lrow"><span class="lk">closed</span><span class="lv">' +
+        esc(String(closed)) + '</span></div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderWarrant(w, used, sealed, closed) {
+    var grantsEl = $("grants");
+    used = used || [];
+    sealed = !!sealed;
+    closed = closed || null;
+
+    if (!w) {
+      $("task-text").textContent = "— no warrant minted yet —";
+      $("warrant-count").textContent = "no active warrant";
+      $("ttlbox").style.display = "none";
+      grantsEl.innerHTML = warrantEmptyState();
+      return;
+    }
+
+    $("task-text").textContent = w.task_statement || "(no task statement)";
+
+    var grants = w.grants || [];
+    var wild = 0, exhausted = 0;
+    var html = lineageHtml(w, sealed, closed);
+    for (var i = 0; i < grants.length; i++) {
+      var g = grants[i] || {};
+      var res = g.resource === undefined || g.resource === null ? "*" : String(g.resource);
+      var isWild = /:\*$/.test(res) || res === "*";
+      if (isWild) wild++;
+      var cons = fmtConstraints(g.constraints);
+      var uses = (g.uses === undefined || g.uses === null) ? 1 : g.uses;
+
+      // `used` is index-aligned with `grants` (broker /warrant/active).
+      var spent = (typeof used[i] === "number") ? used[i] : 0;
+      var left = Math.max(0, uses - spent);
+      var isDone = left === 0;
+      if (isDone) exhausted++;
+
+      html +=
+        '<div class="grant' + (isWild ? " wild" : "") + (isDone ? " exhausted" : "") + '">' +
+          '<div class="gop">' + esc(g.op) + (isWild ? '<span class="gbadge">WIDENED</span>' : "") + '</div>' +
+          '<div class="grow"><span class="gk">resource</span><span class="gv">' + esc(res) + '</span></div>' +
+          '<div class="grow"><span class="gk">bounds</span><span class="gv' + (cons ? "" : " none") + '">' +
+            esc(cons || "none declared") + '</span></div>' +
+          '<div class="grow"><span class="gk">budget</span><span class="gv budget">' +
+            esc(left) + " of " + esc(uses) + ' left' +
+            '<span class="spent"> &nbsp;· ' + esc(spent) +
+            (spent === 1 ? " call spent" : " calls spent") + '</span></span></div>' +
+          (g.justification ? '<div class="gjust">“' + esc(g.justification) + '”</div>' : "") +
+        '</div>';
+    }
+
+    if (!grants.length) {
+      html += '<div class="empty"><div class="etitle">Warrant carries zero grants.</div>' +
+             '<div class="enote">Every call this agent makes will be denied.</div></div>';
+    }
+
+    grantsEl.innerHTML = html;
+    var depth = typeof w.depth === "number" ? w.depth : 0;
+    $("warrant-count").textContent =
+      grants.length + (grants.length === 1 ? " grant" : " grants") +
+      (wild ? " · " + wild + " widened" : " · all pinned to a resource") +
+      (exhausted ? " · " + exhausted + " spent" : "") +
+      (depth > 0 ? " · depth " + depth : "") +
+      (sealed ? " · sealed" : "") +
+      (closed ? " · closed" : "");
+  }
+
+  function sameWarrant(a, b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.warrant_id === b.warrant_id && a.expires_at === b.expires_at &&
+           (a.grants || []).length === (b.grants || []).length &&
+           a.parent_id === b.parent_id && a.depth === b.depth &&
+           a.agent === b.agent;
+  }
+
+  function sameUsed(a, b) {
+    a = a || []; b = b || [];
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  function pollWarrant() {
+    if (warrantEndpointMissing) return;
+    getJSON("/warrant/active").then(function (data) {
+      var w = data ? data.warrant : null;
+      var u = (data && data.used) || [];
+      var sealed = !!(data && data.sealed);
+      var closed = (data && data.closed) || null;
+      if (!sameWarrant(w, activeWarrant) || !sameUsed(u, activeUsed) ||
+          sealed !== activeSealed || closed !== activeClosed) {
+        activeWarrant = w || null;
+        activeUsed = u;
+        activeSealed = sealed;
+        activeClosed = closed;
+        renderWarrant(activeWarrant, activeUsed, activeSealed, activeClosed);
+      }
+    }).catch(function (err) {
+      if (err && err.status === 404) {
+        // Contract does not promise this endpoint. Degrade, don't error.
+        warrantEndpointMissing = true;
+        activeWarrant = null;
+        $("diff").classList.add("no-warrant");
+        $("left-sub").textContent = "the full surface a plain API key hands over";
+        $("taskline").style.display = "none";
+      }
+      // any other failure: broker restarting — the next tick retries
+    });
+  }
+
+  /* =====================================================================
+     TTL countdown
+     ===================================================================== */
+
+  function pad2(n) { return (n < 10 ? "0" : "") + n; }
+
+  function tickTTL() {
+    var box = $("ttlbox");
+    if (!activeWarrant || !activeWarrant.expires_at) {
+      box.style.display = "none";
+      return;
+    }
+    box.style.display = "";
+
+    var now = Date.now() / 1000;
+    var remain = activeWarrant.expires_at - now;
+    var issued = activeWarrant.issued_at || (activeWarrant.expires_at - 300);
+    var total = Math.max(1, activeWarrant.expires_at - issued);
+
+    box.classList.remove("warn", "crit", "dead");
+    if (remain <= 0) {
+      $("ttlclock").textContent = "EXPIRED";
+      $("ttlfill").style.width = "0%";
+      box.classList.add("dead");
+      return;
+    }
+
+    var m = Math.floor(remain / 60);
+    var s = Math.floor(remain % 60);
+    var t = Math.floor((remain * 10) % 10);
+    $("ttlclock").textContent = pad2(m) + ":" + pad2(s) + "." + t;
+    $("ttlfill").style.width = Math.max(0, Math.min(100, (remain / total) * 100)).toFixed(2) + "%";
+    if (remain < 15) box.classList.add("crit");
+    else if (remain < 60) box.classList.add("warn");
+  }
+
+  /* =====================================================================
+     RIGHT PANEL — audit
+     ===================================================================== */
+
+  var seen = Object.create(null);
+  var order = [];              // entry_ids, newest first
+  var MAX_ROWS = 250;
+  var nAllow = 0, nDeny = 0, nCtrl = 0;
+  var listEl = $("auditlist");
+
+  // Lifecycle ops written by _control_audit. They share the audit stream with
+  // /call decisions but are not upstream authorizations — tallying them as
+  // ALLOW inflates the demo score, and their `resource` field is often a task
+  // id, which is not what the resource column means for call-plane rows.
+  function isControlPlane(op) {
+    if (!op) return false;
+    return op === "catalog.register" || op.indexOf("warrant.") === 0;
+  }
+
+  function controlVerb(op) {
+    var parts = String(op || "").split(".");
+    return (parts[parts.length - 1] || op || "?").toUpperCase();
+  }
+
+  function controlSubject(e) {
+    // Never put a raw task UUID in the resource column. Pick the subject the
+    // lifecycle event is actually about.
+    var args = e.args || {};
+    var op = e.op || "";
+    if (op === "warrant.delegate") {
+      var parent = shortId(args.parent_id || e.resource);
+      var agent = args.agent || e.agent || "—";
+      return parent + " → " + agent;
+    }
+    if (op === "catalog.register") {
+      return args.namespace ? String(args.namespace) : "catalog";
+    }
+    if (op === "warrant.close" || op === "warrant.revoke") {
+      // These endpoints already put the warrant id in `resource` on some paths.
+      var target = e.resource;
+      if (!target || target === "-" || target === e.task_id) {
+        target = e.warrant_id;
+      }
+      return shortId(target);
+    }
+    if (op === "warrant.mint" || op === "warrant.release") {
+      if (e.agent && e.agent !== "unknown") return String(e.agent);
+      if (e.warrant_id && e.warrant_id !== "-") return shortId(e.warrant_id);
+      return "—";
+    }
+    // Unknown control op: still refuse to echo a task id as a resource.
+    if (e.resource && e.resource !== "-" && e.resource !== e.task_id) {
+      return shortId(e.resource);
+    }
+    return "—";
+  }
+
+  function emptyAudit() {
+    listEl.innerHTML =
+      '<div class="empty">' +
+        '<div class="etitle">Nothing has been attempted yet.</div>' +
+        '<div class="enote">Every call the agent makes lands here, in order, as the broker decides it. ' +
+        'The agent holds no credential — this stream is the only way anything reaches a real service.</div>' +
+        '<div class="estep" style="margin-top:.5rem"><i>ALLOW</i> &nbsp;the call was inside the warrant; the broker attached the real key</div>' +
+        '<div class="estep"><i>DENY</i> &nbsp;&nbsp;the call left the warrant; the reason column says exactly how</div>' +
+        '<div class="estep"><i>ctrl</i> &nbsp;&nbsp;mint / delegate / release / close — authority changing, not a call</div>' +
+      '</div>';
+  }
+
+  function fmtTime(ts) {
+    var d = new Date((ts || 0) * 1000);
+    if (isNaN(d.getTime())) return "--:--:--";
+    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
+  }
+
+  function fmtArgs(args) {
+    if (!args) return "";
+    var keys = Object.keys(args);
+    if (!keys.length) return "";
+    var parts = [];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      // task_statement is already on the left panel; don't duplicate a paragraph
+      // under every mint row.
+      if (k === "task_statement") continue;
+      var v = args[k];
+      if (typeof v === "string" && v.length > 60) v = v.slice(0, 57) + "…";
+      if (k === "parent_id" || k === "warrant_id") v = shortId(v);
+      if (Array.isArray(v)) v = "[" + v.length + "]";
+      parts.push(k + "=" + (typeof v === "object" ? JSON.stringify(v) : v));
+    }
+    return parts.join("  ");
+  }
+
+  function buildRow(e, animate) {
+    var ctrl = isControlPlane(e.op);
+    var deny = e.decision === "DENY";
+    var div = document.createElement("div");
+    var kind = ctrl ? ("ctrl" + (deny ? " deny" : "")) : (deny ? "deny" : "allow");
+    div.className = "entry arow " + kind + (animate ? " flash" : "");
+
+    var subject = ctrl ? controlSubject(e) : (e.resource || "—");
+    var decision = ctrl
+      ? (deny ? "DENY" : controlVerb(e.op))
+      : (e.decision || "?");
+
+    var argstr = fmtArgs(e.args);
+    div.innerHTML =
+      '<div class="c-time">' + esc(fmtTime(e.ts)) + '</div>' +
+      '<div class="c-op">' + esc(e.op) + '</div>' +
+      '<div class="c-res">' + esc(subject) + '</div>' +
+      '<div class="c-dec">' + esc(decision) + '</div>' +
+      '<div class="c-reason">' + esc(e.reason) + '</div>' +
+      (argstr ? '<div class="c-args">' + esc(argstr) + '</div>' : "");
+    return div;
+  }
+
+  function updateTally() {
+    $("n-allow").textContent = nAllow + " ALLOW";
+    $("n-deny").textContent = nDeny + " DENY";
+    $("n-ctrl").textContent = nCtrl + " ctrl";
+  }
+
+  function idOf(e) {
+    return e.entry_id || (String(e.ts) + "|" + e.op + "|" + e.resource + "|" + e.decision + "|" + e.reason);
+  }
+
+  function addEntry(e, animate) {
+    if (!e || typeof e !== "object") return false;
+    var id = idOf(e);
+    if (seen[id]) return false;
+    seen[id] = true;
+
+    if (!order.length) listEl.innerHTML = "";
+    order.unshift(id);
+
+    if (isControlPlane(e.op)) {
+      nCtrl++;
+    } else if (e.decision === "DENY") {
+      nDeny++;
+    } else {
+      nAllow++;
+    }
+    updateTally();
+
+    listEl.insertBefore(buildRow(e, animate), listEl.firstChild);
+
+    while (order.length > MAX_ROWS) {
+      order.pop();
+      if (listEl.lastChild) listEl.removeChild(listEl.lastChild);
+    }
+    if (animate) listEl.scrollTop = 0;
+    return true;
+  }
+
+  // Backfill. /audit is newest-last, so walk it forward and prepend each —
+  // the result reads newest-first.
+  function backfill() {
+    return getJSON("/audit").then(function (data) {
+      var entries = (data && data.entries) || [];
+      var added = 0;
+      for (var i = 0; i < entries.length; i++) if (addEntry(entries[i], false)) added++;
+      if (!order.length) emptyAudit();
+      return added;
+    }).catch(function () {
+      if (!order.length) emptyAudit();
+      return 0;
+    });
+  }
+
+  /* ---- SSE with self-healing reconnect ---- */
+
+  var es = null, retry = 0, retryTimer = null;
+
+  function setConn(state, text) {
+    var el = $("conn");
+    el.className = state;
+    $("conntext").textContent = text;
+  }
+
+  function connect() {
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    if (es) { try { es.close(); } catch (_) {} es = null; }
+
+    setConn("wait", retry ? "reconnecting" : "connecting");
+
+    try {
+      es = new EventSource(API + "/audit/stream");
+    } catch (_) {
+      scheduleReconnect();
+      return;
+    }
+
+    es.onopen = function () {
+      retry = 0;
+      setConn("live", "live");
+      // fill any gap that opened while we were disconnected
+      backfill();
+    };
+
+    es.onmessage = function (ev) {
+      if (!ev.data) return;
+      var e;
+      try { e = JSON.parse(ev.data); } catch (_) { return; }
+      addEntry(e, true);
+      // An ALLOW just spent budget; refresh the left panel now rather than waiting
+      // for the next poll, so "1 of 1 left" -> "0 of 1 left" lands with the row.
+      // Control-plane rows do not spend call budgets — skip them.
+      if (!isControlPlane(e.op) && e.decision === "ALLOW") pollWarrant();
+      // Mint / delegate / close change which warrant is active or its lineage.
+      if (isControlPlane(e.op) && e.decision === "ALLOW") pollWarrant();
+      if ($("conn").className !== "live") setConn("live", "live");
+    };
+
+    es.onerror = function () {
+      setConn("down", "disconnected");
+      if (!es || es.readyState === 2 /* CLOSED */) scheduleReconnect();
+    };
+  }
+
+  function scheduleReconnect() {
+    if (retryTimer) return;
+    if (es) { try { es.close(); } catch (_) {} es = null; }
+    retry++;
+    var delay = Math.min(1000 * Math.pow(1.6, Math.min(retry, 6)), 10000);
+    retryTimer = setTimeout(function () { retryTimer = null; connect(); }, delay);
+  }
+
+  /* =====================================================================
+     boot
+     ===================================================================== */
+
+  renderWarrant(null);
+  emptyAudit();
+  loadCatalog();
+  pollWarrant();
+  backfill().then(connect);
+
+  setInterval(pollWarrant, 1500);
+  setInterval(tickTTL, 100);
+
+  // If the tab was backgrounded/asleep, re-sync on wake.
+  document.addEventListener("visibilitychange", function () {
+    if (!document.hidden) {
+      pollWarrant();
+      if (!es || es.readyState === 2) connect(); else backfill();
+    }
+  });
+})();
+</script>
+</body>
+</html>

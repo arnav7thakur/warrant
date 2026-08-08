@@ -1,0 +1,74 @@
+{
+  "name": "Internal IT helpdesk",
+  "version": "1.0.0",
+  "owner": "team:it-ops",
+  "description": "A worked example of a third-party operation manifest. Nothing in core/ knows these operations exist; loading this file is the entire onboarding step. Load with core.catalog.load_manifest('examples/it_helpdesk.json'), or set WARRANT_MANIFESTS to its path before the stack boots.",
+
+  "namespace": "helpdesk",
+
+  "services": {
+    "helpdesk": 5
+  },
+
+  "operations": [
+    {
+      "op": "employees.get",
+      "method": "GET",
+      "path": "/employees/{employee_id}",
+      "service": "helpdesk",
+      "mutating": false,
+      "resource_type": "employee",
+      "resource_param": "employee_id",
+      "args": {
+        "employee_id": "Employee directory id, e.g. e-1042"
+      },
+      "description": "Read an employee record: name, team, manager, current device and access assignments."
+    },
+    {
+      "op": "access.list",
+      "method": "GET",
+      "path": "/access",
+      "service": "helpdesk",
+      "mutating": false,
+      "resource_type": null,
+      "resource_param": null,
+      "args": {
+        "system": "Optional system filter, e.g. 'vpn' or 'prod-db'"
+      },
+      "description": "List every standing access grant in the company. Not scoped to one employee: this reaches the whole access map, including who holds production credentials."
+    },
+    {
+      "op": "vpn.grant",
+      "method": "POST",
+      "path": "/access/vpn",
+      "service": "helpdesk",
+      "mutating": true,
+      "resource_type": "employee",
+      "resource_param": "employee_id",
+      "args": {
+        "employee_id": "Employee receiving VPN access, or 'all-engineering' to grant the whole engineering org at once",
+        "duration_hours": "How long the access lasts before it lapses, in hours",
+        "reason": "Free-text justification recorded on the access grant"
+      },
+      "constrainable": ["duration_hours"],
+      "broadcast_values": ["all-engineering"],
+      "description": "Grant temporary VPN access to an employee. Opens a path into the internal network; employee_id='all-engineering' opens it for the entire engineering org at once and is treated as its own resource identity, not as a larger version of one grant."
+    },
+    {
+      "op": "laptops.provision",
+      "method": "POST",
+      "path": "/laptops",
+      "service": "helpdesk",
+      "mutating": true,
+      "resource_type": "employee",
+      "resource_param": "employee_id",
+      "args": {
+        "employee_id": "Employee the laptop is assigned to",
+        "model": "Hardware model to order, e.g. 'mbp-14-m4'",
+        "budget_inr": "Purchase ceiling in INR for this order"
+      },
+      "constrainable": ["budget_inr"],
+      "description": "Order and assign a laptop to an employee. Spends money against the IT hardware budget and cannot be cancelled once the order is placed."
+    }
+  ]
+}

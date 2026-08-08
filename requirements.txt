@@ -1,0 +1,9 @@
+# Warrant -- direct dependencies. Python 3.11.
+# Versions are the ones this project was built and verified against.
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+httpx==0.28.1
+anthropic==0.121.0
+pydantic==2.13.4
+sse-starlette==3.4.8

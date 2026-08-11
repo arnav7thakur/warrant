@@ -484,10 +484,18 @@ async def mint(req: MintRequest, x_operator_key: str = Header(default="")):
         )
 
     started = time.perf_counter()
-    try:
-        grants, reasoning = await derive_grants(req.task_statement)
-    except DerivationError as exc:
-        raise HTTPException(status_code=422, detail=f"derivation failed: {exc}") from exc
+    if req.grants is not None:
+        # Operator-supplied grants: no LLM. Same gates (operator key + seal) still
+        # apply -- this only skips derivation, it does not bypass minting authority.
+        grants = list(req.grants)
+        reasoning = (
+            f"operator-supplied {len(grants)} grant(s); derivation skipped"
+        )
+    else:
+        try:
+            grants, reasoning = await derive_grants(req.task_statement)
+        except DerivationError as exc:
+            raise HTTPException(status_code=422, detail=f"derivation failed: {exc}") from exc
 
     warrant = sign(
         Warrant(

@@ -1,0 +1,9 @@
+[
+  {
+    "op": "wrap.notes_get",
+    "resource": "*",
+    "constraints": {},
+    "uses": 1,
+    "justification": "Deterministic grant for smoke / air-gapped mint: read notes only."
+  }
+]

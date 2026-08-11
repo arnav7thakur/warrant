@@ -142,3 +142,7 @@ class MintRequest(BaseModel):
     principal: str = "human:arnav"
     agent: str = "agent:support-01"
     ttl_seconds: int = 300
+    # When set, the broker signs these grants as-is and does not call the LLM.
+    # Used for air-gapped / deterministic minting and for demos that must not
+    # depend on Gemini being reachable.
+    grants: list[Grant] | None = None

@@ -37,14 +37,40 @@ python -m mcp_server.sync --config examples/wrap_mock.json
 
 Point `examples/wrap_mock.json` (or a copy) at **your** MCP: `command`, `args`, `env`, optional `cwd`. Sync again. Those tools become catalog ops Warrant can grant and enforce.
 
+For a real upstream (not the mock), start from [`examples/wrap_filesystem.json`](examples/wrap_filesystem.json) — official `@modelcontextprotocol/server-filesystem`. Replace the last `args` path with an **absolute** directory (e.g. `…/warrant/examples/sandbox`), sync, mint against the resulting `fs.*` ops.
+
+### Where credentials live
+
+| Kind | Put it here | Never here |
+|---|---|---|
+| Upstream MCP secrets (GitHub PAT, API tokens, …) | wrap config `env` (and only there) | agent env, Cursor chat, `WARRANT_TOKEN` |
+| Broker-forwarded HTTP API keys | `WARRANT_CREDENTIAL_<SERVICE>` or broker env | MCP client / agent process |
+| Authority to *mint* | `OPERATOR_KEY` in the operator shell only | agent / `run_mcp.py` env |
+| What the agent holds | `WARRANT_TOKEN` only | any real upstream credential |
+
+The wrap process (or broker) is the only place that should see real keys. Cursor talks to Warrant; Warrant talks upstream after `/call` says ALLOW.
+
 ### 3. Mint a warrant from the task
 
 ```bash
+# Gemini derives grants from the task (needs GEMINI_API_KEY)
 python -m demo.operator --task "Read note n-1" --quiet
-# → prints WARRANT_TOKEN  (TTL is short — remint when it expires)
+
+# Or skip Gemini — sign a fixed grant list (air-gapped / deterministic)
+python -m demo.operator --task "Read note n-1" --grants examples/grants_read_note.json --quiet
+
+# Remint after the task sealed / TTL expired, and write the token into Cursor
+python -m demo.operator --task "Read note n-1" --grants examples/grants_read_note.json --remint --write-cursor
 ```
 
-Out-of-scope calls (e.g. writing a note, reading a different resource if grants are tight) die at the broker and **never reach** the upstream MCP.
+`--write-cursor` updates `WARRANT_TOKEN` in `%USERPROFILE%\.cursor\mcp.json` (override with `--cursor-mcp`). Reload the warrant MCP in Cursor after. Out-of-scope calls die at the broker and **never reach** the upstream MCP.
+
+Smoke (no Gemini): after sync,
+
+```bash
+python -m demo.smoke_wrap
+# expects ALLOW wrap.notes_get + DENY wrap.notes_write
+```
 
 ### 4. Connect Cursor to Warrant
 
@@ -167,7 +193,7 @@ python -m broker._test_boundary
 
 **Not an IT helpdesk product.** Sample manifests exist to exercise the mechanism. The product is the authority layer under your tools.
 
-**Not done:** multi-tenancy, key rotation, Ed25519, org policy above derivation, polished remint UX for short TTLs.
+**Not done:** multi-tenancy, key rotation, Ed25519, org policy above derivation. Remint is one command (`--remint --write-cursor`); a fully automatic refresh inside the MCP client is still future work.
 
 **Not "zero network."** The agent has no credentials and no unmediated egress. The broker (or wrap process) holds the keys.
 

@@ -1,0 +1,16 @@
+{
+  "name": "Filesystem MCP (official)",
+  "namespace": "fs",
+  "owner": "team:you",
+  "description": "Wrap the official @modelcontextprotocol/server-filesystem. Replace the last args entry with an ABSOLUTE directory path you are willing to expose (e.g. .../warrant/examples/sandbox). Secrets: none for this server — the 'credential' is the directory list itself; do not point it at your home folder. Sync: python -m mcp_server.sync --config examples/wrap_filesystem.json. Windows uses cmd /c npx; on macOS/Linux set command to npx and drop the /c.",
+  "command": "cmd",
+  "args": [
+    "/c",
+    "npx",
+    "-y",
+    "@modelcontextprotocol/server-filesystem",
+    "REPLACE_WITH_ABSOLUTE_PATH_TO_examples/sandbox"
+  ],
+  "env": {},
+  "cwd": null
+}

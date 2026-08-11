@@ -3,8 +3,8 @@
 Routes are exactly the `Operation.path` values declared in core/catalog.py for
 service="support". State is in-memory.
 
-Ticket t-501's body is read at startup from demo/ticket.txt -- it is never inlined here,
-because the injection text lives in exactly one place.
+Ticket t-501's body is read at startup from poc/ticket.txt -- it is never inlined here,
+because the injection text lives in exactly one place (POC theatre, not product).
 
 Every route requires `Authorization: Bearer <UPSTREAM_KEY>`.
 """
@@ -20,7 +20,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException
 UPSTREAM_KEY = os.environ.get("UPSTREAM_KEY", "real-service-key-abc123")
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TICKET_BODY_PATH = REPO_ROOT / "demo" / "ticket.txt"
+TICKET_BODY_PATH = REPO_ROOT / "poc" / "ticket.txt"
 
 
 def _load_ticket_body() -> str:

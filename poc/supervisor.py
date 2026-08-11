@@ -1,8 +1,8 @@
-"""Deterministic supervisor: mint → delegate a narrower slice → run a worker → close.
+"""POC: mint → delegate a narrower slice → run a worker → close.
 
-    python -m demo.supervisor                  # live Claude worker
-    python -m demo.supervisor --scripted       # no model; drives /call itself
-    python -m demo.supervisor --port 8100
+    python -m poc.supervisor                  # live Claude worker
+    python -m poc.supervisor --scripted       # no model; drives /call itself
+    python -m poc.supervisor --port 8100
 
 The supervisor is a script, not a Claude agent. That is deliberate: the beat we need
 to land is that *authority attenuates and can be handed back*, not that a model
@@ -263,7 +263,7 @@ def prove_closed(client: httpx.Client, child_token: str, child_id: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m demo.supervisor",
+        prog="python -m poc.supervisor",
         description=(
             "Deterministic supervisor: mint, delegate a narrower refund slice, "
             "run a worker on that slice, close it when done."
@@ -382,9 +382,11 @@ def main(argv: list[str] | None = None) -> int:
                 return 1
             worker_rc = 0
         else:
-            if not os.environ.get("ANTHROPIC_API_KEY"):
+            from core.llm import has_api_key
+
+            if not has_api_key():
                 print(
-                    "ANTHROPIC_API_KEY is not set. Re-run with --scripted, or export the key.",
+                    "GEMINI_API_KEY is not set. Re-run with --scripted, or export the key.",
                     file=sys.stderr,
                 )
                 return 2

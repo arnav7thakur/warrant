@@ -86,17 +86,50 @@ class Operation(BaseModel):
 # --------------------------------------------------------------------------------------
 
 PORT_BASE = int(os.environ.get("WARRANT_PORT_BASE") or 8100)
-SERVICE_PORTS: dict[str, int] = {
+
+_BUILTIN_SERVICE_PORTS: dict[str, int] = {
     "commerce": PORT_BASE + 1,
     "support": PORT_BASE + 2,
     "comms": PORT_BASE + 3,
 }
-SERVICE_BASE: dict[str, str] = {
-    name: f"http://127.0.0.1:{port}" for name, port in SERVICE_PORTS.items()
+_BUILTIN_SERVICE_BASE: dict[str, str] = {
+    name: f"http://127.0.0.1:{port}" for name, port in _BUILTIN_SERVICE_PORTS.items()
 }
 
-_BUILTIN_SERVICE_PORTS = dict(SERVICE_PORTS)
-_BUILTIN_SERVICE_BASE = dict(SERVICE_BASE)
+# Live service maps. Populated with the commerce trio only when builtins are on;
+# adopter manifests declare their own services when WARRANT_BUILTINS=0.
+SERVICE_PORTS: dict[str, int] = {}
+SERVICE_BASE: dict[str, str] = {}
+
+# Per-service upstream credentials. Looked up by the broker on forward.
+# Env WARRANT_CREDENTIAL_<SERVICE> (service uppercased, hyphens -> underscores)
+# wins; otherwise UPSTREAM_KEY is the shared fallback so existing demos keep working.
+SERVICE_CREDENTIALS: dict[str, str] = {}
+
+# Project metadata from loaded manifests (name, namespace, owner, …). UI reads this.
+PROJECTS: list[dict[str, Any]] = []
+
+
+def builtins_enabled() -> bool:
+    """Whether the shipped commerce/support/comms catalog is installed at import."""
+    raw = os.environ.get("WARRANT_BUILTINS", "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def credential_for(service: str) -> str:
+    """The bearer token the broker attaches when forwarding to `service`."""
+    if service in SERVICE_CREDENTIALS:
+        return SERVICE_CREDENTIALS[service]
+    env_key = "WARRANT_CREDENTIAL_" + service.upper().replace("-", "_")
+    from_env = os.environ.get(env_key)
+    if from_env:
+        return from_env
+    return os.environ.get("UPSTREAM_KEY", "real-service-key-abc123")
+
+
+def set_service_credential(service: str, token: str) -> None:
+    """Record a credential for a service. Never exposed outside the broker process."""
+    SERVICE_CREDENTIALS[service] = token
 
 
 # --------------------------------------------------------------------------------------
@@ -223,7 +256,16 @@ _SERVICE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 _NAMESPACE_RE = re.compile(r"^[A-Za-z0-9]+(?:[._-][A-Za-z0-9]+)*$")
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 _METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE"}
-_MANIFEST_KEYS = {"namespace", "services", "operations", "name", "version", "owner", "description"}
+_MANIFEST_KEYS = {
+    "namespace",
+    "services",
+    "operations",
+    "name",
+    "version",
+    "owner",
+    "description",
+    "credentials",
+}
 
 
 def _tool_name(op_id: str) -> str:
@@ -458,12 +500,18 @@ def register(
     namespace: str | None = None,
     services: Mapping[str, Any] | None = None,
     source: str = "runtime",
+    project: Mapping[str, Any] | None = None,
+    credentials: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Add operations to the live catalog. All-or-nothing.
 
     `operations` is an iterable of dicts (or Operation instances). `namespace`, if given,
     is prefixed onto every op id so two teams can register without colliding. `services`
     declares base URLs for any upstream this batch introduces.
+
+    `credentials` optionally maps service name -> bearer token for broker forwarding.
+    Prefer env `WARRANT_CREDENTIAL_<SERVICE>` in production; this field is for local
+    try-it manifests only and must never be committed with real secrets.
 
     Nothing is installed unless every operation validates -- a half-loaded manifest is
     worse than a rejected one, because the missing half is invisible.
@@ -480,6 +528,20 @@ def register(
 
     where = f"{source}" if namespace is None else f"{source} (namespace {namespace!r})"
     pending_services = _normalise_services(services, where)
+
+    if credentials is not None:
+        if not isinstance(credentials, Mapping):
+            raise CatalogError(f"{where}: 'credentials' must be an object of service -> token.")
+        for svc, token in credentials.items():
+            if not isinstance(svc, str) or not isinstance(token, str) or not token.strip():
+                raise CatalogError(
+                    f"{where}: credentials[{svc!r}] must be a non-empty string bearer token."
+                )
+            if svc not in pending_services and svc not in SERVICE_BASE:
+                raise CatalogError(
+                    f"{where}: credentials reference unknown service {svc!r}. "
+                    "Declare it under 'services' first."
+                )
 
     known_services = set(SERVICE_BASE) | set(pending_services)
     taken: dict[str, str] = dict(_ORIGIN)
@@ -499,9 +561,26 @@ def register(
         if port is not None:
             SERVICE_PORTS[name] = port
         SERVICE_BASE[name] = base
+    if credentials:
+        for name, token in credentials.items():
+            SERVICE_CREDENTIALS[name] = token.strip()
     for op in built:
         CATALOG[op.op] = op
         _ORIGIN[op.op] = where
+
+    if project or namespace:
+        meta = {
+            "name": (project or {}).get("name") or namespace or "untitled",
+            "namespace": namespace,
+            "owner": (project or {}).get("owner"),
+            "version": (project or {}).get("version"),
+            "description": (project or {}).get("description"),
+            "source": source,
+            "operations": [op.op for op in built],
+        }
+        # Replace an existing entry for the same namespace so re-register refreshes meta.
+        PROJECTS[:] = [p for p in PROJECTS if p.get("namespace") != namespace]
+        PROJECTS.append(meta)
 
     return [op.op for op in built]
 
@@ -563,8 +642,24 @@ def load_manifest(path: str | Path, *, namespace: str | None = None) -> list[str
     if services is not None and not isinstance(services, dict):
         raise CatalogError(f"manifest {path}: 'services' must be an object.")
 
+    credentials = data.get("credentials")
+    if credentials is not None and not isinstance(credentials, dict):
+        raise CatalogError(f"manifest {path}: 'credentials' must be an object.")
+
+    project = {
+        "name": data.get("name"),
+        "owner": data.get("owner"),
+        "version": data.get("version"),
+        "description": data.get("description"),
+    }
+
     return register(
-        operations, namespace=namespace, services=services, source=str(path)
+        operations,
+        namespace=namespace,
+        services=services,
+        source=str(path),
+        project=project,
+        credentials=credentials,
     )
 
 
@@ -572,10 +667,13 @@ def reset_to_builtin() -> None:
     """Drop every runtime registration and restore the shipped catalog.
 
     Tests use this to get back to a known state. Mutates in place for the same reason
-    register() does.
+    register() does. Always restores builtins regardless of WARRANT_BUILTINS — tests
+    need a known wall.
     """
     CATALOG.clear()
     _ORIGIN.clear()
+    PROJECTS.clear()
+    SERVICE_CREDENTIALS.clear()
     SERVICE_PORTS.clear()
     SERVICE_PORTS.update(_BUILTIN_SERVICE_PORTS)
     SERVICE_BASE.clear()
@@ -619,8 +717,16 @@ def _autoload_from_env() -> None:
             load_manifest(entry)
 
 
-_install_builtins()
-_autoload_from_env()
+def _boot_registry() -> None:
+    """Install builtins (unless WARRANT_BUILTINS=0) then autoload manifests."""
+    if builtins_enabled():
+        SERVICE_PORTS.update(_BUILTIN_SERVICE_PORTS)
+        SERVICE_BASE.update(_BUILTIN_SERVICE_BASE)
+        _install_builtins()
+    _autoload_from_env()
+
+
+_boot_registry()
 
 
 # --------------------------------------------------------------------------------------
@@ -659,3 +765,20 @@ def full_surface() -> list[dict[str, Any]]:
         }
         for op in CATALOG.values()
     ]
+
+
+def projects_view() -> list[dict[str, Any]]:
+    """Registered project metadata for the UI /catalog response."""
+    return list(PROJECTS)
+
+
+def catalog_meta() -> dict[str, Any]:
+    """Top-level catalog summary the UI uses for branding and filters."""
+    return {
+        "builtins": builtins_enabled() and any(
+            _ORIGIN.get(op) == "builtin" for op in CATALOG
+        ),
+        "namespaces": registered_namespaces(),
+        "projects": projects_view(),
+        "operation_count": len(CATALOG),
+    }

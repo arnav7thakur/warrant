@@ -436,32 +436,70 @@ class Store:
 
     # ----------------------------------------------------------- active warrant
 
+    def _upsert_warrant_row(self, conn: sqlite3.Connection, warrant: Warrant) -> None:
+        conn.execute(
+            "INSERT INTO warrants(warrant_id, issued_at, expires_at, json) VALUES(?,?,?,?) "
+            "ON CONFLICT(warrant_id) DO UPDATE SET json = excluded.json",
+            (warrant.warrant_id, warrant.issued_at, warrant.expires_at, warrant.model_dump_json()),
+        )
+
     def set_active_warrant(self, warrant: Warrant | None) -> None:
         """Record the live warrant, or clear it (a release).
 
         Clearing does not delete the warrant row and never touches `use_budget`. A spent
         budget is a fact about a warrant, not about whether the broker currently regards
         it as active -- and the token is still out there in the agent's hands.
+
+        "Active" means one specific thing: the warrant `/mint`'s sealed-task check looks
+        at. It is not "the roster of everyone currently holding authority" -- that is
+        `list_warrants()`, which every warrant reaches via this same row regardless of
+        whether it ever became active. A root is the only kind of warrant that *can*
+        become active, because only `/mint` calls this; see `record_warrant()` for the
+        other kind.
         """
         with self._tx() as conn:
             if warrant is None:
                 conn.execute("DELETE FROM meta WHERE key='active_warrant_id'")
                 return
-            conn.execute(
-                "INSERT INTO warrants(warrant_id, issued_at, expires_at, json) VALUES(?,?,?,?) "
-                "ON CONFLICT(warrant_id) DO UPDATE SET json = excluded.json",
-                (
-                    warrant.warrant_id,
-                    warrant.issued_at,
-                    warrant.expires_at,
-                    warrant.model_dump_json(),
-                ),
-            )
+            self._upsert_warrant_row(conn, warrant)
             conn.execute(
                 "INSERT INTO meta(key, value) VALUES('active_warrant_id', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (warrant.warrant_id,),
             )
+
+    def record_warrant(self, warrant: Warrant) -> None:
+        """Persist a warrant's row without touching which one is 'active'.
+
+        `/delegate` calls this for every child it mints. Without it, a delegated
+        warrant existed only as a signed token in its holder's hands and a row in the
+        in-memory `DelegationLedger` -- gone on restart, and invisible to
+        `get_warrant()`, to the roster at `GET /warrants`, and to anything else that
+        reads this table. That is the gap that makes a one-root, many-sub-agents fleet
+        invisible: the operator's `/warrant/active` shows only the root, and every
+        sub-agent it delegated to is durable authority the broker cannot list or show
+        detail for. This closes it the same way `set_active_warrant` already does for
+        roots, just without the side effect of re-pointing `active_warrant_id` --
+        delegating a child must never change what `/mint`'s seal check looks at.
+        """
+        with self._lock:
+            self._upsert_warrant_row(self._conn, warrant)
+
+    def list_warrants(self, limit: int = 200) -> list[Warrant]:
+        """Every warrant this broker has minted or delegated, most recent first.
+
+        The roster a fleet needs: `get_active_warrant()` below only ever answers for
+        the single slot `/mint` last pointed at, which is enough for one operator
+        minting one task at a time and not enough for seeing what every connected
+        agent currently holds. This is that list. Bounded, because it backs a live
+        view and not an export -- the durable, unbounded record stays
+        `all_audit()` / `audit_for_warrant()`.
+        """
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT json FROM warrants ORDER BY issued_at DESC LIMIT ?", (max(0, limit),)
+            ).fetchall()
+        return [Warrant.model_validate_json(row["json"]) for row in rows]
 
     def get_active_warrant(self) -> Warrant | None:
         with self._lock:

@@ -7,7 +7,7 @@ Run from the `warrant/` directory. The agent:
 
   1. asserts it holds neither an upstream credential nor an operator credential,
   2. adopts the warrant token it was handed (--warrant) and prints it,
-  3. builds one Claude tool per core.catalog operation,
+  3. builds one Gemini tool per core.catalog operation,
   4. loops: every tool handler does exactly one thing -- POST /call with
      the X-Warrant header. A 403 comes straight back to the model.
 
@@ -30,33 +30,28 @@ import argparse
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
-# Allow `python -m agent.run` to find `core` even if cwd drifted.
 _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import anthropic  # noqa: E402
+from google.genai import types as genai_types  # noqa: E402
 
 from agent import BROKER_URL  # noqa: E402
+from agent import transcript as tr  # noqa: E402
 from agent.broker import (  # noqa: E402
     BrokerClient,
     BrokerProtocolError,
     BrokerUnreachable,
 )
 from agent.tools import build_tools, resolve_op  # noqa: E402
-from agent import transcript as tr  # noqa: E402
+from core.llm import LLMConfigError, client as llm_client, model_name  # noqa: E402
 
-MODEL = "claude-sonnet-5"
-MAX_TOKENS = 8000
+MODEL = model_name()
 
-# The broker's development default, restated -- NOT read from this process's
-# environment, which is asserted to be free of OPERATOR_KEY below. It exists only so
-# the fallback path in `run()` still works out of the box against a stock broker. In
-# any deployment where OPERATOR_KEY is a real secret this constant is wrong, the mint
-# comes back 403, and that is the correct outcome: this process should not be minting.
 DEV_OPERATOR_KEY = "operator-key-change-me"
 
 SYSTEM_PROMPT = """You are a customer-support agent for an online retailer.
@@ -75,13 +70,6 @@ How to work:
 - When you are done, state plainly what you did, what you could not do, and why.
 """
 
-# The same agent, wired the way most support agents actually ship: no mention of a
-# broker, no guidance on untrusted content, and a "complete every step" instruction
-# that reads as diligence until a ticket starts issuing instructions.
-#
-# This is not a strawman. It is close to the median agent system prompt, and the
-# point of the demo is that swapping it changes what the model DOES and changes
-# nothing about what the agent is ALLOWED to do.
 NAIVE_SYSTEM_PROMPT = """You are an automated customer-support agent for an online retailer.
 
 Work each support ticket end to end and resolve it completely before finishing.
@@ -105,73 +93,66 @@ def build_initial_message(task: str, ticket: str | None) -> str:
 
 
 def assert_no_credentials() -> None:
-    """Prove this process can neither reach upstream nor create authority.
-
-    Two separate claims, both checked before anything else happens:
-
-      UPSTREAM_KEY absent -- no way around the broker.
-      OPERATOR_KEY absent -- no way to mint a wider warrant when one is refused.
-
-    Either being present means this is not the process this file describes, so it
-    refuses to run rather than printing a claim that is false.
-    """
     upstream = os.environ.get("UPSTREAM_KEY")
     operator = os.environ.get("OPERATOR_KEY")
 
-    tr.credential_check(upstream is not None)
-    tr.operator_check(operator is not None)
-
-    if upstream is None and operator is None:
-        return
-
-    print()
-    print("REFUSING TO START.")
-    if upstream is not None:
+    problems = []
+    if upstream:
+        problems.append(f"UPSTREAM_KEY is set ({upstream[:4]}…)")
+    if operator:
+        problems.append("OPERATOR_KEY is set")
+    if problems:
+        print("REFUSING TO START — this process must not hold credentials:")
+        for p in problems:
+            print(f"  - {p}")
         print(
-            "  UPSTREAM_KEY is set. This process must not be able to reach an "
-            "upstream service directly."
+            "  The point of this agent is that it holds a warrant and nothing else. Run "
+            "it via `python -m demo.session`, which mints in a separate process and "
+            "hands the token in with --warrant."
         )
-    if operator is not None:
-        print(
-            "  OPERATOR_KEY is set. This process must not be able to mint authority "
-            "for itself; that credential belongs to the operator (demo/operator.py)."
+        raise SystemExit(2)
+
+
+def _sanitize_schema(node: Any) -> Any:
+    """Drop JSON Schema keys Gemini's function-calling API rejects."""
+    if isinstance(node, list):
+        return [_sanitize_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return node
+    out: dict[str, Any] = {}
+    for key, value in node.items():
+        if key in {"additionalProperties", "additional_properties", "$schema", "default"}:
+            continue
+        out[key] = _sanitize_schema(value)
+    return out
+
+
+def _tools_for_gemini(tools: list[dict[str, Any]]) -> list[genai_types.Tool]:
+    decls = []
+    for tool in tools:
+        params = _sanitize_schema(
+            tool.get("input_schema") or {"type": "object", "properties": {}}
         )
-    print()
-    print(
-        "  The point of this agent is that it holds a warrant and nothing else. Run "
-        "it via `python -m demo.session`, which mints in a separate process and "
-        "hands the token in with --warrant."
-    )
-    raise SystemExit(2)
+        decls.append(
+            genai_types.FunctionDeclaration(
+                name=tool["name"],
+                description=tool.get("description") or tool["name"],
+                parameters=params,
+            )
+        )
+    return [genai_types.Tool(function_declarations=decls)]
+
+def _parts_text(parts: list[Any]) -> str:
+    chunks = []
+    for part in parts:
+        text = getattr(part, "text", None)
+        if text:
+            chunks.append(text)
+    return "\n".join(chunks)
 
 
-def _text_of(block: Any) -> str:
-    return getattr(block, "text", "") or ""
-
-
-def _create_message(
-    client: anthropic.Anthropic,
-    messages: list[dict[str, Any]],
-    tools: list[dict[str, Any]],
-    thinking: bool,
-) -> tuple[Any, bool]:
-    """Call the model. If summarized thinking is rejected, fall back once."""
-    kwargs: dict[str, Any] = {
-        "model": MODEL,
-        "max_tokens": MAX_TOKENS,
-        "system": SYSTEM_PROMPT,
-        "tools": tools,
-        "messages": messages,
-    }
-    if thinking:
-        kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-    try:
-        return client.messages.create(**kwargs), thinking
-    except anthropic.BadRequestError:
-        if not thinking:
-            raise
-        kwargs.pop("thinking", None)
-        return client.messages.create(**kwargs), False
+def _function_calls(parts: list[Any]) -> list[Any]:
+    return [p for p in parts if getattr(p, "function_call", None) is not None]
 
 
 def run(
@@ -188,18 +169,22 @@ def run(
     print(f"broker          : {broker_url}  (the only service this process talks to)")
     print(f"model           : {MODEL}")
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    try:
+        llm = llm_client()
+    except LLMConfigError as exc:
         print()
-        print("ANTHROPIC_API_KEY is not set in the environment. Cannot start.")
+        print(str(exc))
         return 2
 
-    llm = anthropic.Anthropic()
     tools = build_tools()
+    gemini_tools = _tools_for_gemini(tools)
+    config = genai_types.GenerateContentConfig(
+        system_instruction=SYSTEM_PROMPT,
+        tools=gemini_tools,
+        temperature=0.2,
+    )
 
     with BrokerClient(base_url=broker_url) as broker:
-        # 1. acquire the warrant -----------------------------------------
-        # Handed in is the shape that makes the claim true. Minting here is a
-        # fallback for a single-terminal demo, and it says so, loudly.
         if warrant_token:
             try:
                 warrant = broker.use_token(warrant_token)
@@ -239,11 +224,12 @@ def run(
             "X-Warrant header. The warrant decides which of them actually work."
         )
 
-        # 2. loop --------------------------------------------------------
-        messages: list[dict[str, Any]] = [
-            {"role": "user", "content": build_initial_message(task, ticket)}
+        contents: list[genai_types.Content] = [
+            genai_types.Content(
+                role="user",
+                parts=[genai_types.Part.from_text(text=build_initial_message(task, ticket))],
+            )
         ]
-        thinking = True
         allowed_count = 0
         denied_count = 0
         turn = 0
@@ -254,33 +240,32 @@ def run(
             tr.turn_header(turn)
 
             try:
-                response, thinking = _create_message(llm, messages, tools, thinking)
-            except anthropic.APIError as exc:
+                response = llm.models.generate_content(
+                    model=MODEL,
+                    contents=contents,
+                    config=config,
+                )
+            except Exception as exc:  # noqa: BLE001
                 print()
                 print(f"MODEL CALL FAILED: {exc}")
                 return 1
 
-            turn_text: list[str] = []
-            tool_uses: list[Any] = []
+            candidate = (response.candidates or [None])[0]
+            if candidate is None or candidate.content is None:
+                print()
+                print("MODEL CALL FAILED: empty response")
+                return 1
 
-            for block in response.content:
-                kind = getattr(block, "type", "")
-                if kind == "thinking":
-                    summary = getattr(block, "thinking", "") or ""
-                    if summary.strip():
-                        tr.model_thinking(summary)
-                elif kind == "text":
-                    text = _text_of(block)
-                    if text.strip():
-                        turn_text.append(text)
-                        tr.model_text(text)
-                elif kind == "tool_use":
-                    tool_uses.append(block)
+            parts = list(candidate.content.parts or [])
+            contents.append(candidate.content)
 
-            messages.append({"role": "assistant", "content": response.content})
+            text = _parts_text(parts)
+            if text.strip():
+                tr.model_text(text)
 
-            if response.stop_reason != "tool_use" or not tool_uses:
-                final_text = "\n\n".join(turn_text)
+            calls = _function_calls(parts)
+            if not calls:
+                final_text = text
                 if follow_ups:
                     nxt = follow_ups.pop(0)
                     tr.section("THE OPERATOR ASKS FOR ONE MORE THING")
@@ -291,30 +276,36 @@ def run(
                         "for more -- whether the asking comes from the operator, from a "
                         "customer's ticket text, or from the model's own reasoning."
                     )
-                    messages.append({"role": "user", "content": nxt})
+                    contents.append(
+                        genai_types.Content(
+                            role="user",
+                            parts=[genai_types.Part.from_text(text=nxt)],
+                        )
+                    )
                     continue
                 break
 
-            results: list[dict[str, Any]] = []
-            for block in tool_uses:
-                args = dict(block.input or {})
+            response_parts: list[genai_types.Part] = []
+            for part in calls:
+                fn = part.function_call
+                name = fn.name or ""
+                raw_args = fn.args or {}
+                args = dict(raw_args) if hasattr(raw_args, "items") else dict(raw_args or {})
+                call_id = getattr(fn, "id", None) or str(uuid.uuid4())
+
                 try:
-                    op = resolve_op(block.name)
+                    op = resolve_op(name)
                 except KeyError:
-                    tr.tool_error(0, f"model asked for unknown tool {block.name!r}")
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": f"No such tool: {block.name}",
-                            "is_error": True,
-                        }
+                    tr.tool_error(0, f"model asked for unknown tool {name!r}")
+                    response_parts.append(
+                        genai_types.Part.from_function_response(
+                            name=name,
+                            response={"error": f"No such tool: {name}"},
+                        )
                     )
                     continue
 
                 tr.tool_call(op, args)
-
-                # THE ONLY THING A TOOL HANDLER DOES.
                 try:
                     outcome = broker.call(op, args)
                 except BrokerUnreachable as exc:
@@ -325,41 +316,43 @@ def run(
                 if outcome.denied:
                     denied_count += 1
                     tr.tool_denied(op, outcome.resource, outcome.reason)
-                    # Verbatim, unedited, straight back to the model.
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": (
-                                "DENIED by the broker (HTTP 403). "
-                                f"reason: {outcome.reason}"
-                            ),
-                            "is_error": True,
-                        }
+                    response_parts.append(
+                        genai_types.Part.from_function_response(
+                            name=name,
+                            response={
+                                "denied": True,
+                                "reason": outcome.reason,
+                                "http_status": 403,
+                            },
+                        )
                     )
                 elif outcome.allowed:
                     allowed_count += 1
                     tr.tool_allowed(outcome.upstream_status, outcome.data)
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": json.dumps(outcome.data, default=str),
-                        }
+                    response_parts.append(
+                        genai_types.Part.from_function_response(
+                            name=name,
+                            response={
+                                "ok": True,
+                                "status": outcome.upstream_status,
+                                "data": outcome.data,
+                            },
+                        )
                     )
                 else:
                     detail = json.dumps(outcome.body, default=str)[:1000]
                     tr.tool_error(outcome.status_code, detail)
-                    results.append(
-                        {
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": f"Broker error {outcome.status_code}: {detail}",
-                            "is_error": True,
-                        }
+                    response_parts.append(
+                        genai_types.Part.from_function_response(
+                            name=name,
+                            response={
+                                "error": f"Broker error {outcome.status_code}: {detail}"
+                            },
+                        )
                     )
+                _ = call_id  # reserved if Gemini starts requiring ids on responses
 
-            messages.append({"role": "user", "content": results})
+            contents.append(genai_types.Content(role="user", parts=response_parts))
         else:
             final_text = f"(stopped after the {max_turns}-turn limit)"
 

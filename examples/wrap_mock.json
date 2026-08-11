@@ -1,0 +1,10 @@
+{
+  "name": "Mock notes MCP",
+  "namespace": "wrap",
+  "owner": "team:warrant",
+  "description": "Starter wrap target. Replace command/args/env with any stdio MCP you already run (GitHub, filesystem, internal tools). Sync with: python -m mcp_server.sync --config examples/wrap_mock.json",
+  "command": "python",
+  "args": ["-m", "examples.mock_upstream_mcp"],
+  "env": {},
+  "cwd": null
+}

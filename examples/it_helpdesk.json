@@ -2,7 +2,7 @@
   "name": "Internal IT helpdesk",
   "version": "1.0.0",
   "owner": "team:it-ops",
-  "description": "A worked example of a third-party operation manifest. Nothing in core/ knows these operations exist; loading this file is the entire onboarding step. Load with core.catalog.load_manifest('examples/it_helpdesk.json'), or set WARRANT_MANIFESTS to its path before the stack boots.",
+  "description": "Try-it example for a third-party operation manifest. Boot with: python -m demo.stack up --profile helpdesk (sets WARRANT_BUILTINS=0 and WARRANT_MANIFESTS to this file). Or load via core.catalog.load_manifest / POST /catalog/register.",
 
   "namespace": "helpdesk",
 

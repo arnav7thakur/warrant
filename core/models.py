@@ -124,10 +124,17 @@ class AuditEntry(BaseModel):
 
 
 class CallRequest(BaseModel):
-    """What the agent sends to the broker. Note: carries no credential."""
+    """What the agent sends to the broker. Note: carries no credential.
+
+    `authorize_only=True` means: enforce and audit (and spend the use budget on
+    ALLOW), but do not forward to an HTTP upstream. Used by the MCP wrap path —
+    the wrap process holds the upstream MCP connection and performs the call
+    itself after the broker says yes.
+    """
 
     op: str
     args: dict[str, Any] = Field(default_factory=dict)
+    authorize_only: bool = False
 
 
 class MintRequest(BaseModel):

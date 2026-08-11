@@ -1,14 +1,8 @@
-﻿"""Deterministic end-to-end proof: mint -> happy path -> injected actions -> denial.
+﻿"""POC: deterministic end-to-end proof (injection theatre).
 
-No model in the call loop, so this cannot wander. Run it when you need the enforcement
-argument to land in 20 seconds, or as the fallback if the live agent demo misbehaves.
+Not the product path. Prefer register → mint → MCP for trying Warrant on your system.
 
-    python -m demo.run_demo [--port 8100]
-
-This script plays both roles at once -- it mints as the operator and then makes the
-calls an agent would make -- so it presents X-Operator-Key on /mint and on nothing
-else. The calls below carry a warrant and no operator credential, which is exactly
-what the agent carries. See `demo/session.py` for the two-process version.
+    python -m poc.run_demo [--port 8100]
 """
 
 from __future__ import annotations

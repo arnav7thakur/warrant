@@ -3,976 +3,694 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Warrant — scope diff &amp; live audit</title>
-<!-- Inline, so the browser never requests /favicon.ico and the broker never 404s.
-     Keeps the console clean on stage. No external file, no CDN. -->
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2305080e'/%3E%3Cpath d='M16 4l10 4v8c0 6.2-4.2 10.6-10 12-5.8-1.4-10-5.8-10-12V8z' fill='none' stroke='%2321e06b' stroke-width='2.5'/%3E%3C/svg%3E">
+<title>Warrant — an authority layer for AI agents</title>
+<meta name="description" content="Agents don't get API keys. They get short-lived, task-derived warrants, enforced at the wire. Connect Warrant under the MCP tools you already use.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%2312151a'/%3E%3Ccircle cx='16' cy='16' r='10.5' fill='none' stroke='%23b08d4f' stroke-width='1.6'/%3E%3Ctext x='16' y='21' font-family='Courier New,monospace' font-size='13' font-weight='700' fill='%23b08d4f' text-anchor='middle'%3EW%3C/text%3E%3C/svg%3E">
 <style>
-  /* ---------- tokens ---------- */
-  :root{
-    --bg:        #05080e;
-    --panel:     #0b1017;
-    --panel-2:   #0e141d;
-    --line:      #1d2735;
-    --line-soft: #151d28;
+  :root {
+    /* ---- desk (dark, warm graphite — not pure black) ---- */
+    --ink-900: #12151a;
+    --ink-850: #171b21;
+    --ink-800: #1b2028;
+    --ink-700: #262d37;
+    --ink-line: #2a3138;
 
-    --text:      #e9f0f9;
-    --text-2:    #9fb0c6;
-    --wall:      #6d7f97;   /* the greyed-out wall */
-    --wall-mut:  #9c5f68;   /* mutating op inside the wall */
+    /* ---- the document (aged paper, lives on the desk) ---- */
+    --paper: #ede4d0;
+    --paper-dim: #e1d5b8;
+    --paper-line: #c9b98f;
+    --type-ink: #211d16;
 
-    --green:     #21e06b;
-    --green-bg:  rgba(33,224,107,.13);
-    --red:       #ff3d49;
-    --red-bg:    rgba(255,61,73,.16);
-    --amber:     #ffb020;
-    --amber-bg:  rgba(255,176,32,.14);
-    --cyan:      #4dd2ff;
+    /* ---- ink stamps ---- */
+    --seal: #8a2a35;          /* oxblood — deny / risk */
+    --seal-soft: rgba(138, 42, 53, 0.14);
+    --grant: #21603f;         /* pine — allow / grant */
+    --grant-soft: rgba(33, 96, 63, 0.16);
+    --brass: #b08d4f;         /* signature accent, rings, links */
+    --brass-soft: rgba(176, 141, 79, 0.14);
 
-    --mono: ui-monospace, "Cascadia Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", "Courier New", monospace;
-    --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  }
+    /* ---- text on the desk ---- */
+    --text: #ece5d6;
+    --muted: #a89a80;
+    --muted-2: #766c59;
 
-  *{ box-sizing:border-box; }
-  html,body{ height:100%; margin:0; }
-  html{ font-size: clamp(15px, 0.92vw, 23px); }
-  body{
-    background:var(--bg); color:var(--text);
-    font-family:var(--sans);
-    font-size:1rem; line-height:1.35;
-    overflow:hidden;
-    -webkit-font-smoothing:antialiased;
+    --display: "Courier New", "Courier Prime", ui-monospace, SFMono-Regular, monospace;
+    --body: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --mono: "Cascadia Mono", Consolas, "SFMono-Regular", ui-monospace, monospace;
+    --maxw: 74rem;
   }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { animation-duration: 0.001ms !important; animation-iteration-count: 1 !important; transition-duration: 0.001ms !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--ink-900);
+    color: var(--text);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+    background-image:
+      radial-gradient(60% 50% at 12% -8%, rgba(176, 141, 79, 0.09), transparent 60%),
+      radial-gradient(40% 35% at 100% 0%, rgba(138, 42, 53, 0.08), transparent 60%);
+    background-attachment: fixed;
+  }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
 
-  /* ---------- shell ---------- */
-  #shell{
-    height:100vh; width:100vw;
-    display:grid;
-    grid-template-columns: minmax(0, 44fr) minmax(0, 56fr);
-    gap:0.5rem; padding:0.5rem;
+  code {
+    font-family: var(--mono);
+    font-size: 0.84em;
+    background: var(--ink-800);
+    border: 1px solid var(--ink-line);
+    padding: 0.1em 0.4em;
+    border-radius: 3px;
+    color: var(--text);
   }
-  .panel{
-    background:var(--panel);
-    border:2px solid var(--line);
-    border-radius:.5rem;
-    display:flex; flex-direction:column;
-    min-width:0; min-height:0; overflow:hidden;
-  }
-  .panel > header{
-    flex:0 0 auto;
-    padding:.55rem .8rem;
-    border-bottom:2px solid var(--line);
-    background:var(--panel-2);
-    display:flex; align-items:center; gap:.7rem; flex-wrap:wrap;
-  }
-  .panel h1{
-    margin:0; font-size:1.25rem; font-weight:800;
-    letter-spacing:.14em; text-transform:uppercase;
-  }
-  .panel h1 .dotmark{ color:var(--cyan); }
-  .sub{ font-size:.72rem; letter-spacing:.16em; text-transform:uppercase; color:var(--text-2); font-weight:700; }
-  .spacer{ flex:1 1 auto; }
+  pre { margin: 0; font-family: var(--mono); font-size: 0.85rem; line-height: 1.65; overflow-x: auto; }
+  pre code { background: none; border: none; padding: 0; font-size: 1em; }
 
-  /* ---------- LEFT: scope diff ---------- */
-  #taskline{
-    flex:0 0 auto;
-    padding:.5rem .8rem;
-    border-bottom:2px solid var(--line-soft);
-    font-family:var(--mono); font-size:.82rem; color:var(--text-2);
-    line-height:1.3;
-    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
-  }
-  #taskline b{ color:var(--cyan); font-weight:700; letter-spacing:.08em; }
-  #taskline .task-text{ color:var(--text); }
+  .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 1.75rem; }
+  section { position: relative; }
 
-  #diff{
-    flex:1 1 auto; min-height:0;
-    display:grid;
-    grid-template-columns: minmax(0,1fr) minmax(0,1.08fr);
-    gap:0;
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--brass);
+    margin: 0 0 1rem;
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
   }
-  #diff.no-warrant{ grid-template-columns: minmax(0,1fr); }
-  #diff.no-warrant #col-warrant{ display:none; }
+  .eyebrow .rule { flex: 1 1 auto; height: 1px; background: var(--ink-line); display: none; }
 
-  .col{ min-width:0; min-height:0; display:flex; flex-direction:column; overflow:hidden; }
-  .col + .col{ border-left:2px solid var(--line); }
-  .col > .colhead{
-    flex:0 0 auto; padding:.5rem .7rem .4rem;
-    border-bottom:1px solid var(--line-soft);
-  }
-  .colhead .kicker{ font-size:.68rem; letter-spacing:.18em; text-transform:uppercase; color:var(--text-2); font-weight:700; }
-  .colhead .title{ font-size:1.02rem; font-weight:800; margin-top:.1rem; }
-  #col-surface .colhead .title{ color:var(--wall); }
-  #col-warrant .colhead .title{ color:var(--green); }
-  .colhead .count{ font-family:var(--mono); font-size:.75rem; color:var(--text-2); margin-top:.15rem; }
-
-  .scroll{ flex:1 1 auto; min-height:0; overflow-y:auto; overflow-x:hidden; padding:.45rem .7rem .8rem; }
-  .scroll::-webkit-scrollbar{ width:8px; }
-  .scroll::-webkit-scrollbar-thumb{ background:#243040; border-radius:4px; }
-  .scroll::-webkit-scrollbar-track{ background:transparent; }
-
-  /* the wall */
-  .wallitem{
-    border-left:3px solid #2b3646;
-    padding:.24rem 0 .34rem .5rem;
-    margin-bottom:.5rem;
-    color:var(--wall);
-  }
-  .wallitem.mut{ border-left-color:var(--wall-mut); }
-  .wallitem .wop{
-    font-family:var(--mono); font-size:1.04rem; font-weight:700;
-    text-decoration:line-through; text-decoration-thickness:2px;
-  }
-  .wallitem.mut .wop{ color:var(--wall-mut); }
-  .wallitem .wtag{
-    font-size:.6rem; font-weight:800; letter-spacing:.13em;
-    border:1px solid var(--wall-mut); color:var(--wall-mut);
-    padding:0 .28rem; border-radius:.18rem; margin-left:.35rem;
-    vertical-align:.09em; text-decoration:none; white-space:nowrap;
-  }
-  .wallitem .wmeta{
-    font-family:var(--mono); font-size:.76rem;
-    text-decoration:line-through; text-decoration-thickness:1px;
-    opacity:.86; margin-top:.08rem;
-  }
-  .wallitem .wmeta span{ margin-right:.7rem; white-space:nowrap; }
-  .wallitem .wargs{
-    font-family:var(--mono); font-size:.72rem; opacity:.7; margin-top:.05rem;
-    text-decoration:line-through; text-decoration-thickness:1px;
-  }
-  #wallfoot{
-    margin-top:.5rem; padding-top:.45rem; border-top:1px dashed #2b3646;
-    font-family:var(--mono); font-size:.74rem; color:var(--wall);
+  h1, h2, h3 { margin: 0; font-family: var(--display); font-weight: 700; letter-spacing: -0.01em; }
+  h2 { font-size: clamp(1.55rem, 2.8vw, 2rem); }
+  h3 { font-size: 1.05rem; font-weight: 700; }
+  p { margin: 0; }
+  .lede {
+    font-family: var(--body);
+    color: var(--muted);
+    font-size: 1.1rem;
+    max-width: 42rem;
+    margin: 1rem 0 0;
+    line-height: 1.6;
   }
 
-  /* TTL */
-  #ttlbox{
-    flex:0 0 auto; margin:.45rem .7rem .1rem;
-    border:2px solid var(--green); border-radius:.4rem;
-    background:var(--green-bg); padding:.35rem .6rem .45rem;
+  /* ================= nav ================= */
+  #nav {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    background: rgba(18, 21, 26, 0.86);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--ink-line);
   }
-  #ttlbox.warn{ border-color:var(--amber); background:var(--amber-bg); }
-  #ttlbox.crit{ border-color:var(--red); background:var(--red-bg); }
-  #ttlbox.dead{ border-color:var(--red); background:var(--red-bg); }
-  #ttlbox .ttllabel{ font-size:.66rem; letter-spacing:.18em; text-transform:uppercase; color:var(--text-2); font-weight:700; }
-  #ttlclock{
-    font-family:var(--mono); font-size:2.05rem; font-weight:800; line-height:1.05;
-    color:var(--green); font-variant-numeric:tabular-nums; letter-spacing:.02em;
+  #nav .wrap { display: flex; align-items: center; gap: 1.6rem; height: 3.9rem; }
+  .brandmark {
+    width: 1.9rem; height: 1.9rem; border-radius: 50%;
+    border: 1.5px solid var(--brass);
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--display); font-weight: 700; font-size: 0.92rem;
+    color: var(--brass); flex: 0 0 auto;
   }
-  #ttlbox.warn #ttlclock{ color:var(--amber); }
-  #ttlbox.crit #ttlclock, #ttlbox.dead #ttlclock{ color:var(--red); }
-  #ttlbar{ height:6px; background:#122132; border-radius:3px; overflow:hidden; margin-top:.28rem; }
-  #ttlfill{ height:100%; width:100%; background:var(--green); transition:width .12s linear; }
-  #ttlbox.warn #ttlfill{ background:var(--amber); }
-  #ttlbox.crit #ttlfill, #ttlbox.dead #ttlfill{ background:var(--red); }
+  #nav .logo {
+    display: flex; align-items: center; gap: 0.6rem;
+    font-family: var(--display); font-weight: 700; font-size: 1.02rem;
+    letter-spacing: 0.02em;
+    text-decoration: none; color: var(--text);
+  }
+  #nav nav { display: flex; gap: 1.5rem; margin-left: 0.75rem; }
+  #nav nav a {
+    font-family: var(--mono); font-size: 0.78rem; letter-spacing: 0.03em;
+    color: var(--muted); text-decoration: none;
+  }
+  #nav nav a:hover { color: var(--text); }
+  #nav .spacer { flex: 1 1 auto; }
 
-  /* bright grants */
-  .grant{
-    border:2px solid var(--green);
-    border-left-width:8px;
-    border-radius:.35rem;
-    background:var(--green-bg);
-    padding:.35rem .55rem .45rem;
-    margin-bottom:.5rem;
+  .btn {
+    display: inline-flex; align-items: center; gap: 0.4rem;
+    font-family: var(--mono); font-size: 0.8rem; font-weight: 700;
+    letter-spacing: 0.04em; text-transform: uppercase;
+    text-decoration: none;
+    padding: 0.55rem 1rem;
+    border-radius: 3px;
+    border: 1.5px solid var(--brass);
+    white-space: nowrap;
+    transition: background 0.15s, color 0.15s, transform 0.1s;
   }
-  .grant.wild{ border-color:var(--amber); background:var(--amber-bg); }
-  .grant .gop{
-    font-family:var(--mono); font-size:1.12rem; font-weight:800; color:var(--green);
-    word-break:break-word;
-  }
-  .grant.wild .gop{ color:var(--amber); }
-  .grant .gbadge{
-    display:inline-block; font-size:.6rem; font-weight:900; letter-spacing:.13em;
-    background:var(--amber); color:#1b1200; padding:.05rem .3rem; border-radius:.18rem;
-    margin-left:.4rem; vertical-align:.13em; white-space:nowrap;
-  }
-  .grant .grow{ display:flex; gap:.45rem; font-family:var(--mono); font-size:.8rem; margin-top:.16rem; align-items:baseline; }
-  .grant .gk{ color:var(--text-2); flex:0 0 5.2rem; text-transform:uppercase; font-size:.66rem; letter-spacing:.1em; font-weight:700; }
-  .grant .gv{ color:var(--text); font-weight:700; word-break:break-word; }
-  .grant .gv.none{ color:var(--text-2); font-weight:400; }
-  .grant .gv .spent{ color:var(--text-2); font-weight:400; }
-  /* Spent budget is not a failure -- the authority was used as intended. Dim it,
-     don't redden it, or three used grants read as three denials from the back row. */
-  .grant.exhausted{ opacity:.82; }
-  .grant.exhausted .gv.budget{ color:var(--amber); }
-  .grant .gjust{
-    margin-top:.28rem; font-size:.74rem; color:var(--text-2);
-    font-style:italic; line-height:1.3;
-    border-top:1px solid rgba(255,255,255,.08); padding-top:.22rem;
-  }
+  .btn:active { transform: translateY(1px); }
+  .btn-ghost { color: var(--text); background: transparent; border-color: var(--ink-line); }
+  .btn-ghost:hover { border-color: var(--brass); color: var(--brass); }
+  .btn-solid { color: var(--ink-900); background: var(--brass); }
+  .btn-solid:hover { background: #c39d5c; }
 
-  /* empty states */
-  .empty{
-    margin:.5rem 0; padding:.7rem .8rem;
-    border:2px dashed #2b3646; border-radius:.4rem;
-    color:var(--text-2);
-  }
-  .empty .etitle{ color:var(--text); font-weight:800; font-size:.98rem; margin-bottom:.3rem; letter-spacing:.02em; }
-  .empty .estep{ font-family:var(--mono); font-size:.78rem; margin:.16rem 0; }
-  .empty .estep i{ color:var(--cyan); font-style:normal; font-weight:700; }
-  .empty .enote{ font-size:.76rem; margin-top:.4rem; line-height:1.35; }
+  /* ================= hero ================= */
+  #hero { padding: 5.5rem 0 5rem; border-bottom: 1px solid var(--ink-line); }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.85fr); gap: 3.5rem; align-items: center; }
 
-  /* ---------- RIGHT: audit ---------- */
-  #conn{
-    display:flex; align-items:center; gap:.35rem;
-    font-size:.68rem; letter-spacing:.14em; text-transform:uppercase; font-weight:800;
-    border:1px solid var(--line); border-radius:1rem; padding:.12rem .5rem .12rem .4rem;
-  }
-  #conndot{ width:.62rem; height:.62rem; border-radius:50%; background:var(--amber); box-shadow:0 0 .5rem currentColor; }
-  #conn.live #conndot{ background:var(--green); animation:pulse 2s ease-in-out infinite; }
-  #conn.down #conndot{ background:var(--red); }
-  #conn.live{ color:var(--green); border-color:rgba(33,224,107,.4); }
-  #conn.down{ color:var(--red);   border-color:rgba(255,61,73,.5); }
-  #conn.wait{ color:var(--amber); border-color:rgba(255,176,32,.45); }
-  @keyframes pulse{ 0%,100%{opacity:1} 50%{opacity:.35} }
+  #hero .docket { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.1em; color: var(--muted-2); margin-bottom: 1.4rem; }
+  #hero .docket b { color: var(--brass); }
 
-  .tally{ font-family:var(--mono); font-size:.8rem; font-weight:800; }
-  .tally .ta{ color:var(--green); }
-  .tally .td{ color:var(--red); }
-  .tally .tc{ color:var(--cyan); }
-  .tally .sep{ color:var(--line); margin:0 .3rem; }
+  #hero h1 {
+    font-size: clamp(2rem, 4.6vw, 3.05rem);
+    line-height: 1.2;
+    max-width: 34rem;
+    color: var(--text);
+  }
+  .redact {
+    position: relative; display: inline-block; cursor: help;
+  }
+  .redact .rtext {
+    text-decoration: line-through;
+    text-decoration-color: var(--seal);
+    text-decoration-thickness: 2px;
+  }
+  .redact .rbar {
+    position: absolute; inset: -0.06em -0.15em;
+    background: #0a0a0a;
+    border-radius: 2px;
+    transition: opacity 0.2s ease;
+  }
+  .redact:hover .rbar, .redact:focus-visible .rbar { opacity: 0; }
+  #hero h1 .accent { color: var(--grant); }
 
-  .arow{
-    display:grid;
-    grid-template-columns: 6.2rem 9.6rem 8.4rem 5.6rem minmax(0,1fr);
-    gap:.55rem;
-    align-items:start;
-  }
-  #audithead{
-    flex:0 0 auto;
-    padding:.3rem .8rem .3rem;
-    border-bottom:2px solid var(--line);
-    background:var(--panel-2);
-    font-size:.64rem; letter-spacing:.17em; text-transform:uppercase;
-    color:var(--text-2); font-weight:800;
-  }
-  #auditlist{ flex:1 1 auto; min-height:0; overflow-y:auto; padding:.4rem .8rem 1rem; }
-  #auditlist::-webkit-scrollbar{ width:8px; }
-  #auditlist::-webkit-scrollbar-thumb{ background:#243040; border-radius:4px; }
+  #hero .lede { font-size: 1.16rem; max-width: 36rem; }
+  #hero .cta-row { display: flex; gap: 0.9rem; margin-top: 2.2rem; flex-wrap: wrap; }
+  #hero .cta-row .btn { padding: 0.75rem 1.3rem; font-size: 0.82rem; }
+  #hero .subnote { margin-top: 1.2rem; font-family: var(--mono); font-size: 0.78rem; color: var(--muted-2); }
 
-  .entry{
-    padding:.4rem .5rem .45rem;
-    border-radius:.3rem;
-    border-left:8px solid transparent;
-    margin-bottom:.4rem;
-    font-family:var(--mono);
-    font-size:.86rem;
+  /* ---- signature element: the warrant slip ---- */
+  .slip-wrap { position: relative; }
+  .slip {
+    position: relative;
+    background: var(--paper);
+    color: var(--type-ink);
+    border-radius: 2px;
+    padding: 1.6rem 1.6rem 1.5rem 2rem;
+    box-shadow: 0 30px 60px -25px rgba(0,0,0,0.55), 0 2px 0 rgba(0,0,0,0.2);
+    transform: rotate(1.1deg);
   }
-  .entry .c-time{ color:var(--text-2); font-size:.8rem; font-variant-numeric:tabular-nums; }
-  .entry .c-op{ font-weight:800; word-break:break-word; }
-  .entry .c-res{ color:var(--text); word-break:break-word; }
-  .entry .c-dec{ font-weight:900; letter-spacing:.09em; }
-  .entry .c-reason{ line-height:1.35; word-break:break-word; }
+  .slip::before {
+    content: "";
+    position: absolute;
+    left: -1px; top: 0; bottom: 0; width: 16px;
+    background-image: radial-gradient(circle at 0 9px, transparent 6.5px, var(--paper) 7px);
+    background-size: 16px 18px;
+    background-repeat: repeat-y;
+  }
+  .slip-head {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--paper-line);
+    padding-bottom: 0.7rem; margin-bottom: 0.9rem;
+  }
+  .slip-head .title { font-family: var(--display); font-weight: 700; font-size: 0.98rem; letter-spacing: 0.04em; }
+  .slip-head .num { font-family: var(--mono); font-size: 0.68rem; color: #5a5140; }
+  .slip-field { display: grid; grid-template-columns: 6.2rem minmax(0,1fr); gap: 0.5rem; padding: 0.32rem 0; font-family: var(--mono); font-size: 0.8rem; }
+  .slip-field .k { color: #6b5f47; letter-spacing: 0.04em; text-transform: uppercase; font-size: 0.66rem; padding-top: 0.15rem; }
+  .slip-field .v { word-break: break-word; }
+  .slip-foot {
+    margin-top: 1rem; padding-top: 0.9rem; border-top: 1px solid var(--paper-line);
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem;
+  }
+  .barcode { display: flex; align-items: flex-end; gap: 1.5px; height: 1.7rem; opacity: 0.82; }
+  .barcode span { display: block; background: #23201a; width: 2px; }
+  .slip-foot .sig-label { font-family: var(--mono); font-size: 0.6rem; letter-spacing: 0.1em; color: #6b5f47; margin-top: 0.3rem; }
 
-  .entry.allow{ background:var(--green-bg); border-left-color:var(--green); }
-  .entry.allow .c-op{ color:#bff5d5; }
-  .entry.allow .c-dec{ color:var(--green); }
-  .entry.allow .c-reason{ color:#cfe6da; }
-
-  .entry.deny{
-    background:var(--red-bg);
-    border:2px solid var(--red); border-left-width:10px;
-    font-size:1.02rem;
-    padding:.55rem .6rem .6rem;
-    box-shadow:0 0 1.4rem rgba(255,61,73,.3);
+  .stamp {
+    position: absolute;
+    top: -0.9rem; right: -0.7rem;
+    width: 6.2rem; height: 6.2rem;
+    border-radius: 50%;
+    border: 2.5px solid var(--grant);
+    color: var(--grant);
+    display: flex; align-items: center; justify-content: center;
+    text-align: center;
+    font-family: var(--mono); font-weight: 700; font-size: 0.62rem; letter-spacing: 0.06em;
+    text-transform: uppercase;
+    transform: rotate(-11deg);
+    background: rgba(33, 96, 63, 0.05);
+    mix-blend-mode: multiply;
+    animation: stamp-in 0.5s cubic-bezier(0.2, 1.4, 0.4, 1) 0.15s both;
   }
-  .entry.deny .c-op{ color:#ffd7da; }
-  .entry.deny .c-res{ color:#fff; font-weight:800; }
-  .entry.deny .c-dec{ color:#fff; background:var(--red); border-radius:.2rem; padding:.05rem .3rem; text-align:center; }
-  .entry.deny .c-reason{ color:#ffe3e5; font-weight:700; }
-  .entry.deny .c-time{ color:#ffb3b8; }
-  .entry.flash{ animation:denyflash 1.1s cubic-bezier(.2,.7,.3,1) 1; }
-  @keyframes denyflash{
-    0%   { background:#ff3d49; box-shadow:0 0 0 .7rem rgba(255,61,73,.55); }
-    12%  { background:#ff3d49; box-shadow:0 0 0 .7rem rgba(255,61,73,.55); }
-    100% { background:var(--red-bg); box-shadow:0 0 1.4rem rgba(255,61,73,.3); }
-  }
-  .entry.allow.flash{ animation:allowflash .8s ease-out 1; }
-  @keyframes allowflash{
-    0%{ background:rgba(33,224,107,.55); }
-    100%{ background:var(--green-bg); }
+  @media (prefers-reduced-motion: reduce) { .stamp { animation: none; } }
+  @keyframes stamp-in {
+    0% { opacity: 0; transform: rotate(-11deg) scale(1.9); }
+    100% { opacity: 1; transform: rotate(-11deg) scale(1); }
   }
 
-  /* Control-plane lifecycle rows (mint / delegate / release / close / revoke /
-     catalog.register). Same log, different meaning: nothing reached an upstream,
-     so they must not look like ALLOWs and must not put a task id in "resource". */
-  .entry.ctrl{
-    background:rgba(77,210,255,.10);
-    border-left-color:var(--cyan);
-    border:1px solid rgba(77,210,255,.28); border-left-width:8px;
-  }
-  .entry.ctrl .c-op{ color:#b8ecff; }
-  .entry.ctrl .c-res{ color:var(--cyan); font-weight:700; }
-  .entry.ctrl .c-dec{
-    color:#041018; background:var(--cyan); border-radius:.2rem;
-    padding:.05rem .3rem; text-align:center; font-size:.72rem;
-  }
-  .entry.ctrl .c-reason{ color:#cfe8f3; }
-  .entry.ctrl .c-time{ color:#8ec8de; }
-  .entry.ctrl.deny{
-    background:var(--red-bg);
-    border:2px solid var(--red); border-left-width:10px;
-    box-shadow:0 0 1.1rem rgba(255,61,73,.22);
-  }
-  .entry.ctrl.deny .c-op{ color:#ffd7da; }
-  .entry.ctrl.deny .c-res{ color:#fff; }
-  .entry.ctrl.deny .c-dec{ color:#fff; background:var(--red); }
-  .entry.ctrl.deny .c-reason{ color:#ffe3e5; font-weight:700; }
-  .entry.ctrl.flash{ animation:ctrlflash .7s ease-out 1; }
-  @keyframes ctrlflash{
-    0%{ background:rgba(77,210,255,.42); }
-    100%{ background:rgba(77,210,255,.10); }
-  }
-  .entry.ctrl.deny.flash{ animation:denyflash 1.1s cubic-bezier(.2,.7,.3,1) 1; }
+  /* ================= section shell ================= */
+  .section { padding: 5rem 0; border-bottom: 1px solid var(--ink-line); }
+  .section-head { max-width: 42rem; margin-bottom: 3rem; }
 
-  .entry .c-args{
-    grid-column:5 / 6;
-    color:var(--text-2); font-size:.72rem; margin-top:.2rem;
-    word-break:break-word;
+  /* ================= §1 the case (problem) ================= */
+  .exhibits { display: grid; grid-template-columns: 1fr 1fr; gap: 2.25rem; }
+  .exhibit { position: relative; padding-top: 1.9rem; }
+  .exhibit-tab {
+    position: absolute; top: 0; left: 1.2rem;
+    font-family: var(--mono); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 0.3rem 0.7rem;
+    border: 1px solid var(--ink-line); border-bottom: none;
+    background: var(--ink-800);
+    color: var(--muted);
+    border-radius: 4px 4px 0 0;
   }
+  .exhibit.risk .exhibit-tab { color: var(--seal); border-color: var(--seal-soft); }
+  .exhibit.safe .exhibit-tab { color: var(--grant); border-color: var(--grant-soft); }
+  .exhibit-body {
+    border: 1px solid var(--ink-line);
+    background: var(--ink-800);
+    border-radius: 0 6px 6px 6px;
+    padding: 1.4rem 1.5rem 1.5rem;
+  }
+  .exhibit.risk .exhibit-body { border-color: var(--seal-soft); }
+  .exhibit.safe .exhibit-body { border-color: var(--grant-soft); }
+  .exhibit-body p { color: var(--muted); font-size: 0.98rem; margin-bottom: 0.9rem; }
+  .exhibit-body p:last-child { margin-bottom: 0; }
+  .exhibit-body strong { color: var(--text); }
 
-  /* Delegation lineage on the warrant panel */
-  .lineage{
-    border:2px solid rgba(77,210,255,.35);
-    border-left-width:8px;
-    border-radius:.35rem;
-    background:rgba(77,210,255,.08);
-    padding:.4rem .55rem .45rem;
-    margin-bottom:.55rem;
-    font-family:var(--mono);
+  /* ================= §2 procedure ================= */
+  .docket-list { border: 1px solid var(--ink-line); border-radius: 6px; overflow: hidden; background: var(--ink-800); }
+  .docket-row {
+    display: grid; grid-template-columns: 4.5rem minmax(0,1fr); gap: 1.1rem;
+    padding: 1.4rem 1.6rem;
+    border-bottom: 1px solid var(--ink-line);
   }
-  .lineage .lrow{
-    display:flex; flex-wrap:wrap; gap:.35rem .55rem; align-items:baseline;
-    font-size:.78rem; color:var(--text);
+  .docket-row:last-child { border-bottom: none; }
+  .docket-mark {
+    font-family: var(--mono); font-weight: 700; font-size: 0.78rem; letter-spacing: 0.02em;
+    color: var(--brass);
+    border: 1.5px solid var(--brass);
+    border-radius: 3px;
+    height: 2.15rem;
+    display: flex; align-items: center; justify-content: center;
+    transform: rotate(-2deg);
   }
-  .lineage .lrow + .lrow{ margin-top:.22rem; }
-  .lineage .ltag{
-    display:inline-block; font-size:.58rem; font-weight:900; letter-spacing:.12em;
-    text-transform:uppercase; padding:.04rem .28rem; border-radius:.18rem;
-    background:var(--cyan); color:#041018; vertical-align:.08em;
+  .docket-row h3 { margin-bottom: 0.4rem; color: var(--text); }
+  .docket-row p { color: var(--muted); font-size: 0.96rem; }
+  .docket-row code { font-size: 0.78rem; }
+
+  /* ================= §3 leverage ================= */
+  .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1.15rem; }
+  .card {
+    border: 1px solid var(--ink-line); background: var(--ink-800); border-radius: 6px;
+    padding: 1.4rem 1.4rem 1.5rem;
+    transition: border-color 0.15s, transform 0.15s;
   }
-  .lineage .ltag.del{ background:var(--amber); color:#1b1200; }
-  .lineage .ltag.sealed{ background:#2a3a50; color:var(--text-2); }
-  .lineage .ltag.closed{ background:var(--red); color:#fff; }
-  .lineage .lk{ color:var(--text-2); font-size:.66rem; letter-spacing:.08em; text-transform:uppercase; font-weight:700; }
-  .lineage .lv{ color:var(--text); font-weight:700; word-break:break-word; }
-  .lineage .lparent{ color:var(--cyan); }
+  .card:hover { border-color: var(--brass); transform: translateY(-2px); }
+  .card .code-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 700; font-size: 0.68rem; letter-spacing: 0.03em;
+    color: var(--brass); border: 1.5px solid var(--brass); border-radius: 3px;
+    padding: 0.28rem 0.55rem;
+    margin-bottom: 1rem;
+    transform: rotate(-2deg);
+  }
+  .card h3 { margin-bottom: 0.5rem; color: var(--text); font-size: 1rem; }
+  .card p { color: var(--muted); font-size: 0.94rem; }
+
+  /* ================= §4 enforcement on record ================= */
+  .record-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1rem; }
+  .record {
+    border: 1px solid var(--ink-line); border-radius: 6px; background: var(--ink-800);
+    padding: 1rem 1.1rem 1.15rem;
+  }
+  .record .stamp-mini {
+    display: inline-block;
+    font-family: var(--mono); font-weight: 800; font-size: 0.66rem; letter-spacing: 0.08em;
+    padding: 0.18rem 0.5rem; border-radius: 3px; border: 1.5px solid currentColor;
+    transform: rotate(-3deg);
+    margin-bottom: 0.6rem;
+  }
+  .record.allow .stamp-mini { color: var(--grant); }
+  .record.deny .stamp-mini { color: var(--seal); }
+  .record .op { font-family: var(--mono); font-size: 0.84rem; font-weight: 700; color: var(--text); }
+  .record .reason { margin-top: 0.4rem; font-size: 0.83rem; color: var(--muted); font-family: var(--body); }
+
+  /* ================= §5 who is authorized ================= */
+  .audience { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.15rem; }
+  .aud-card { border: 1px solid var(--ink-line); background: var(--ink-800); border-radius: 6px; padding: 1.4rem 1.5rem; }
+  .aud-card .who {
+    display: flex; align-items: center; gap: 0.6rem;
+    font-family: var(--mono); font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em;
+    text-transform: uppercase; color: var(--brass); margin-bottom: 0.7rem;
+  }
+  .aud-card .who .code-badge {
+    font-size: 0.62rem; padding: 0.15rem 0.4rem; margin: 0; transform: none;
+  }
+  .aud-card p { margin: 0; color: var(--muted); font-size: 0.94rem; }
+  .aud-card ul { margin: 0.7rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: 0.9rem; }
+  .aud-card li { margin-bottom: 0.3rem; }
+  .aud-card li:last-child { margin-bottom: 0; }
+
+  /* ================= §6 field manual (quickstart) ================= */
+  .manual { border: 1px solid var(--ink-line); border-radius: 6px; background: var(--ink-850); overflow: hidden; }
+  .manual-bar {
+    display: flex; align-items: center; gap: 0.5rem;
+    padding: 0.7rem 1rem; background: var(--ink-800); border-bottom: 1px solid var(--ink-line);
+    font-family: var(--mono); font-size: 0.74rem; color: var(--muted-2);
+  }
+  .manual-bar b { color: var(--brass); }
+  .manual-body { padding: 1.3rem 1.5rem 1.5rem; color: #d8cfa8; }
+  .manual-body .c1 { color: var(--muted-2); }
+  .manual-body .c2 { color: #8fbf9f; }
+
+  /* ================= §7 stated plainly ================= */
+  .footnotes { border-top: 1px solid var(--ink-line); padding-top: 1.6rem; }
+  .fn-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem 2.2rem; }
+  .fn-item { display: flex; gap: 0.7rem; font-size: 0.94rem; color: var(--muted); align-items: flex-start; }
+  .fn-item .n { font-family: var(--mono); color: var(--seal); font-weight: 700; flex: 0 0 auto; }
+  .fn-item strong { color: var(--text); }
+
+  /* ================= final ================= */
+  #final { padding: 5.5rem 0 6rem; text-align: center; }
+  #final .docket { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.1em; color: var(--brass); text-transform: uppercase; margin-bottom: 1rem; }
+  #final h2 { max-width: 32rem; margin: 0 auto; font-size: clamp(1.6rem, 3.4vw, 2.3rem); }
+  #final .lede { margin-left: auto; margin-right: auto; }
+  #final .cta-row { justify-content: center; margin-top: 2rem; }
+
+  /* ================= footer ================= */
+  footer { padding: 2.4rem 0; color: var(--muted-2); font-family: var(--mono); font-size: 0.78rem; }
+  footer .wrap { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+  footer a { color: var(--muted); text-decoration: none; }
+  footer a:hover { color: var(--brass); }
+  footer nav { display: flex; gap: 1.3rem; }
+
+  @media (max-width: 900px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 2.75rem; }
+    .exhibits { grid-template-columns: 1fr; gap: 3rem; }
+    .cards { grid-template-columns: 1fr 1fr; }
+    .audience { grid-template-columns: 1fr; }
+    .record-list { grid-template-columns: 1fr 1fr; }
+    .fn-list { grid-template-columns: 1fr; }
+    #nav nav { display: none; }
+    .slip { transform: none; }
+  }
+  @media (max-width: 620px) {
+    .cards { grid-template-columns: 1fr; }
+    .record-list { grid-template-columns: 1fr; }
+    .docket-row { grid-template-columns: 3rem 1fr; padding: 1.1rem; }
+    .section { padding: 3.25rem 0; }
+    #hero { padding: 4rem 0 3rem; }
+  }
 </style>
 </head>
 <body>
 
-<div id="shell">
-
-  <!-- ============ LEFT ============ -->
-  <section class="panel" id="left">
-    <header>
-      <h1>Scope <span class="dotmark">diff</span></h1>
-      <div class="spacer"></div>
-      <div class="sub" id="left-sub">what a key grants &nbsp;vs&nbsp; what this warrant grants</div>
-    </header>
-
-    <div id="taskline"><b>TASK</b> &nbsp;<span class="task-text" id="task-text">— no warrant minted yet —</span></div>
-
-    <div id="diff">
-      <div class="col" id="col-surface">
-        <div class="colhead">
-          <div class="kicker">Baseline</div>
-          <div class="title">What an API key grants</div>
-          <div class="count" id="surface-count">loading catalog…</div>
-        </div>
-        <div class="scroll" id="wall"></div>
-      </div>
-
-      <div class="col" id="col-warrant">
-        <div class="colhead">
-          <div class="kicker">Derived, signed, expiring</div>
-          <div class="title">What this warrant grants</div>
-          <div class="count" id="warrant-count">no active warrant</div>
-        </div>
-
-        <div id="ttlbox" style="display:none">
-          <div class="ttllabel">expires in</div>
-          <div id="ttlclock">--:--</div>
-          <div id="ttlbar"><div id="ttlfill"></div></div>
-        </div>
-
-        <div class="scroll" id="grants"></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ============ RIGHT ============ -->
-  <section class="panel" id="right">
-    <header>
-      <h1>Live <span class="dotmark">audit</span></h1>
-      <div class="spacer"></div>
-      <div class="tally" id="tally"><span class="ta" id="n-allow">0 ALLOW</span><span class="sep">|</span><span class="td" id="n-deny">0 DENY</span><span class="sep">|</span><span class="tc" id="n-ctrl">0 ctrl</span></div>
-      <div id="conn" class="wait"><span id="conndot"></span><span id="conntext">connecting</span></div>
-    </header>
-
-    <div id="audithead" class="arow">
-      <div>time</div><div>op</div><div>resource</div><div>decision</div><div>reason</div>
-    </div>
-
-    <div id="auditlist"></div>
-  </section>
-
+<div id="nav">
+  <div class="wrap">
+    <a class="logo" href="/">
+      <span class="brandmark">W</span>
+      Warrant
+    </a>
+    <nav>
+      <a href="#case">The case</a>
+      <a href="#procedure">Procedure</a>
+      <a href="#leverage">Leverage</a>
+      <a href="#who">Who it's for</a>
+      <a href="#manual">Quickstart</a>
+    </nav>
+    <div class="spacer"></div>
+    <a class="btn btn-ghost" href="https://github.com/arnav7thakur/warrant" target="_blank" rel="noopener">GitHub</a>
+    <a class="btn btn-solid" href="/console">Open console</a>
+  </div>
 </div>
 
-<script>
-(function () {
-  "use strict";
+<section id="hero">
+  <div class="wrap">
+    <div class="hero-grid">
+      <div>
+        <div class="docket">CASE FILE NO. <b>001</b> — AUTHORITY LAYER FOR AI AGENTS</div>
+        <h1>Agents don't hold
+          <span class="redact" tabindex="0" title="hover to declassify">
+            <span class="rtext">API keys</span>
+            <span class="rbar" aria-hidden="true"></span>
+          </span>.
+          They hold <span class="accent">warrants</span>.</h1>
+        <p class="lede">Short-lived authority, derived from the task, enforced at the wire. A prompt injection can still talk the model into anything — it just can't act on anything the warrant didn't grant.</p>
+        <div class="cta-row">
+          <a class="btn btn-solid" href="#manual">Connect an MCP</a>
+          <a class="btn btn-ghost" href="#procedure">See how it works</a>
+        </div>
+        <div class="subnote">NO SDK TO ADOPT — IT'S A BROKER AND A TOKEN FORMAT. ANYTHING THAT SPEAKS MCP OR HTTP CAN SIT BEHIND IT.</div>
+      </div>
+
+      <div class="slip-wrap">
+        <div class="slip">
+          <div class="stamp">Enforced<br>at the<br>wire</div>
+          <div class="slip-head">
+            <div class="title">WARRANT</div>
+            <div class="num">NO. 7F3A–01</div>
+          </div>
+          <div class="slip-field"><div class="k">Principal</div><div class="v">human:you</div></div>
+          <div class="slip-field"><div class="k">Agent</div><div class="v">agent:cursor-01</div></div>
+          <div class="slip-field"><div class="k">Grants</div><div class="v">mcp.notes_get on note:n-1</div></div>
+          <div class="slip-field"><div class="k">Bound</div><div class="v">1 use · read-only</div></div>
+          <div class="slip-field"><div class="k">Expires</div><div class="v">04:32 from mint</div></div>
+          <div class="slip-foot">
+            <div>
+              <div class="barcode" aria-hidden="true">
+                <span style="height:60%;width:2px"></span><span style="height:100%;width:1px"></span><span style="height:45%;width:2px"></span>
+                <span style="height:80%;width:1px"></span><span style="height:30%;width:2px"></span><span style="height:100%;width:1px"></span>
+                <span style="height:55%;width:2px"></span><span style="height:70%;width:1px"></span><span style="height:40%;width:2px"></span>
+                <span style="height:95%;width:1px"></span><span style="height:60%;width:2px"></span><span style="height:25%;width:1px"></span>
+                <span style="height:85%;width:2px"></span><span style="height:50%;width:1px"></span><span style="height:100%;width:2px"></span>
+                <span style="height:35%;width:1px"></span><span style="height:65%;width:2px"></span><span style="height:90%;width:1px"></span>
+                <span style="height:45%;width:2px"></span><span style="height:75%;width:1px"></span><span style="height:55%;width:2px"></span>
+                <span style="height:100%;width:1px"></span><span style="height:30%;width:2px"></span><span style="height:60%;width:1px"></span>
+              </div>
+              <div class="sig-label">HMAC SIGNATURE</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="case" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§1 — The case</div>
+      <h2>Prompt injection isn't a model problem. It's an authority problem.</h2>
+      <p class="lede">An agent that does anything real needs credentials. Today that's a static API key — it does everything the key can do, forever, no matter what the agent was actually asked to do.</p>
+    </div>
+    <div class="exhibits">
+      <div class="exhibit risk">
+        <div class="exhibit-tab">Exhibit A — today</div>
+        <div class="exhibit-body">
+          <p>The agent reads a ticket, a doc, a web page — text it didn't write. That text contains instructions. The model follows them. It's still holding a key that can <strong>refund any order, merge any PR, email every customer</strong>, regardless of what the task actually was.</p>
+          <p>The usual answer is to try harder at the model layer — better prompts, injection classifiers — or add a human approval step that turns into rubber-stamping at scale.</p>
+        </div>
+      </div>
+      <div class="exhibit safe">
+        <div class="exhibit-tab">Exhibit B — with Warrant</div>
+        <div class="exhibit-body">
+          <p>Authority is derived from the stated task <strong>before</strong> the agent reads anything untrusted, then signed and time-boxed. The agent's only egress is a broker that checks every call against that warrant.</p>
+          <p>The injected instruction still convinces the model. The call still gets attempted. It just <strong>dies at the wire</strong> — not because anything detected an attack, but because that operation was never on the warrant.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="procedure" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§2 — The procedure</div>
+      <h2>Four steps, and the agent never touches a key</h2>
+      <p class="lede">Minting requires an operator credential. Calling doesn't. The agent process structurally cannot mint its own authority.</p>
+    </div>
+    <div class="docket-list">
+      <div class="docket-row">
+        <div class="docket-mark">R-1</div>
+        <div><h3>State the task</h3><p>A human (or an upstream service) writes what the agent is being asked to do — in plain language, before any tool runs.</p></div>
+      </div>
+      <div class="docket-row">
+        <div class="docket-mark">R-2</div>
+        <div><h3>Derive the minimum authority</h3><p>Gemini reads the task plus your operation catalog and emits the narrowest possible grant set — operations, resource ids, argument bounds, a use budget, a short TTL. It never sees tool output or untrusted content.</p></div>
+      </div>
+      <div class="docket-row">
+        <div class="docket-mark">R-3</div>
+        <div><h3>Sign the warrant</h3><p>The grant set becomes a short-lived, signed token. The agent or MCP client carries this token — nothing else.</p></div>
+      </div>
+      <div class="docket-row">
+        <div class="docket-mark">R-4</div>
+        <div><h3>Enforce at the wire</h3><p>Every call — HTTP <code>/call</code> or an MCP tool invocation — is checked against the warrant. Match: the broker attaches the real credential (or authorizes an upstream MCP) and forwards it. No match: <code>403</code>, logged with a plain-language reason.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="leverage" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§3 — How to leverage this</div>
+      <h2>Sits in front of what you already run</h2>
+      <p class="lede">Warrant doesn't ask you to rewrite your tools. It doesn't ask you to adopt an SDK either.</p>
+    </div>
+    <div class="cards">
+      <div class="card">
+        <div class="code-badge">MCP</div>
+        <h3>Wrap an MCP you already use</h3>
+        <p>GitHub, filesystem, internal tool servers — most already hold a fat service account. Sync their tools into the catalog; Warrant authorizes, then forwards. No changes to the upstream server.</p>
+      </div>
+      <div class="card">
+        <div class="code-badge">IDE</div>
+        <h3>Scope every Cursor session</h3>
+        <p>A session starts from a task, not a role. The MCP tools it sees are exactly what that task needs — nothing left over for an injected instruction to exploit.</p>
+      </div>
+      <div class="card">
+        <div class="code-badge">A / B</div>
+        <h3>Split planner and worker</h3>
+        <p>Give the planner a read-only warrant. Mint the worker's mutate warrant only after a human or policy approves the plan. Poisoned research context can't widen what the worker may do.</p>
+      </div>
+      <div class="card">
+        <div class="code-badge">API</div>
+        <h3>Bring your own HTTP APIs</h3>
+        <p>Declare operations in a JSON manifest — paths, args, which arguments must be bounded. Derivation, enforcement, MCP tools, and the live console all update from one source of truth.</p>
+      </div>
+      <div class="card">
+        <div class="code-badge">CI</div>
+        <h3>Bound blast radius in CI</h3>
+        <p>A deploy job gets a warrant for one service and one environment. Prod access and secret exfiltration die at the broker, not at a post-hoc review.</p>
+      </div>
+      <div class="card">
+        <div class="code-badge">LOG</div>
+        <h3>Full attribution, for free</h3>
+        <p>Every decision is audited with who, which agent, which task, and why — allow or deny. Not a feature you bolt on; a byproduct of routing everything through one place.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="record" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§4 — Enforcement on record</div>
+      <h2>The broker doesn't need to know what an attack looks like</h2>
+      <p class="lede">It performs a lookup: is this operation, on this resource, with these arguments, on the warrant? A wildcard can never authorize a mutation, however the grant came to exist — enforcement doesn't trust derivation, even if derivation is compromised.</p>
+    </div>
+    <div class="record-list">
+      <div class="record allow"><div class="stamp-mini">ALLOW</div><div class="op">refunds.create</div><div class="reason">order 1234, within the granted amount — forwarded with the real key</div></div>
+      <div class="record deny"><div class="stamp-mini">DENY</div><div class="op">orders.get</div><div class="reason">granted only on order:1234; this call reaches order:9999</div></div>
+      <div class="record deny"><div class="stamp-mini">DENY</div><div class="op">email.send</div><div class="reason">warrant grants no authority for email.send</div></div>
+      <div class="record deny"><div class="stamp-mini">DENY</div><div class="op">refunds.create</div><div class="reason">wildcard grant — wildcards never authorize mutations</div></div>
+    </div>
+  </div>
+</section>
+
+<section id="who" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§5 — Who is authorized</div>
+      <h2>Anyone whose agent currently holds more than it needs</h2>
+    </div>
+    <div class="audience">
+      <div class="aud-card">
+        <div class="who"><span class="code-badge">IDE</span> IDE / Cursor users</div>
+        <p>You've connected MCP servers with real tokens behind them. Warrant scopes what a given session can actually do, per task.</p>
+        <ul><li>Wrap GitHub, filesystem, or internal MCPs</li><li>Deny by default; grant only what the task states</li></ul>
+      </div>
+      <div class="aud-card">
+        <div class="who"><span class="code-badge">A / B</span> Multi-agent builders</div>
+        <p>Planner / worker / auditor roles that currently share one credential. Give each its own warrant, scoped to its job.</p>
+        <ul><li>Read-only research agents, mutate-capable actors</li><li>Per-resource scoping so sibling agents can't cross-touch</li></ul>
+      </div>
+      <div class="aud-card">
+        <div class="who"><span class="code-badge">SEC</span> Platform / security teams</div>
+        <p>The blocker on shipping agents in a regulated org is usually "we can't give it credentials." This is the layer that unblocks that.</p>
+        <ul><li>Full audit trail: who, agent, task, allow/deny, why</li><li>Blast-radius bounds on CI and deploy agents</li></ul>
+      </div>
+      <div class="aud-card">
+        <div class="who"><span class="code-badge">SDK</span> Agent framework authors</div>
+        <p>You don't want to build an authority model, same reason nobody wants to write their own auth. Register a catalog, inherit derivation and enforcement.</p>
+        <ul><li>Nothing to import — it's a proxy and a token format</li><li>Works from any language behind MCP or HTTP</li></ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="manual" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§6 — Field manual</div>
+      <h2>Wrap an MCP in about 10 minutes</h2>
+      <p class="lede">Sync its tools into the catalog, mint a warrant from a task, connect Cursor to Warrant instead of the upstream directly.</p>
+    </div>
+    <div class="manual">
+      <div class="manual-bar"><b>powershell</b> — run from warrant/</div>
+      <div class="manual-body">
+<pre><code><span class="c1"># 1. install</span>
+python -m venv .venv <span class="c1">&&</span> .venv/Scripts/pip install -r requirements.txt
+<span class="c1"># set GEMINI_API_KEY (or put it in a gitignored .env)</span>
+
+<span class="c1"># 2. broker up, empty catalog</span>
+python -m demo.stack up --profile wrap
+
+<span class="c1"># 3. sync an MCP's tools into the catalog</span>
+python -m mcp_server.sync --config examples/wrap_mock.json
+
+<span class="c1"># 4. mint a warrant from the task</span>
+<span class="c2">python -m demo.operator --task "Read note n-1" --quiet</span>
+<span class="c1"># → prints WARRANT_TOKEN</span>
+
+<span class="c1"># 5. point Cursor at run_mcp.py with WARRANT_WRAP_CONFIG + WARRANT_TOKEN</span></code></pre>
+      </div>
+    </div>
+    <div class="cta-row" style="margin-top:1.75rem; display:flex; gap:0.9rem; flex-wrap:wrap;">
+      <a class="btn btn-solid" href="https://github.com/arnav7thakur/warrant#readme" target="_blank" rel="noopener">Full quickstart in README</a>
+      <a class="btn btn-ghost" href="/console">Watch it live in the console</a>
+    </div>
+  </div>
+</section>
+
+<section id="stated" class="section">
+  <div class="wrap">
+    <div class="section-head">
+      <div class="eyebrow">§7 — Stated plainly</div>
+      <h2>What this is not</h2>
+    </div>
+    <div class="footnotes">
+      <div class="fn-list">
+        <div class="fn-item"><span class="n">1.</span><div><strong>Not a guardrail.</strong> A guardrail inspects an action and judges it. This performs a lookup against a signed warrant.</div></div>
+        <div class="fn-item"><span class="n">2.</span><div><strong>Not a helpdesk product.</strong> Sample manifests exercise the mechanism. The product is the authority layer under your tools.</div></div>
+        <div class="fn-item"><span class="n">3.</span><div><strong>Not "zero network."</strong> The agent has no credentials and no unmediated egress — the broker (or wrap process) holds the keys.</div></div>
+        <div class="fn-item"><span class="n">4.</span><div><strong>Not finished everywhere.</strong> Multi-tenancy, key rotation, Ed25519 signing, and org policy above derivation are roadmap.</div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="final">
+  <div class="wrap">
+    <div class="docket">Closing statement</div>
+    <h2>Stop trying to make the model resistant.<br>Take the key away from it.</h2>
+    <p class="lede">Connect Warrant under the MCP tools you already run — the agent keeps working, the credential never leaves the broker.</p>
+    <div class="cta-row">
+      <a class="btn btn-solid" href="#manual">Get started</a>
+      <a class="btn btn-ghost" href="/console">Open the live console</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div>WARRANT — AN AUTHORITY LAYER FOR AI AGENTS. FILED AT PUSH TO PROD, BENGALURU, AUG 2026.</div>
+    <nav>
+      <a href="/console">Console</a>
+      <a href="https://github.com/arnav7thakur/warrant" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/arnav7thakur/warrant/blob/main/CONTRACTS.md" target="_blank" rel="noopener">Contracts</a>
+    </nav>
+  </div>
+</footer>
 
-  // Served from the broker at "/", so relative URLs. If someone opens the file
-  // directly off disk, fall back to the broker's loopback address.
-  var API = (location.protocol === "file:" || !location.host) ? "http://127.0.0.1:8100" : "";
-
-  var $ = function (id) { return document.getElementById(id); };
-
-  function esc(s) {
-    return String(s === null || s === undefined ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  function getJSON(path) {
-    return fetch(API + path, { cache: "no-store" }).then(function (r) {
-      if (!r.ok) { var e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
-      return r.json();
-    });
-  }
-
-  /* =====================================================================
-     LEFT PANEL — the wall
-     ===================================================================== */
-
-  var catalogLoaded = false;
-
-  function renderWall(surface, argsByOp) {
-    var wall = $("wall");
-    var mutating = 0;
-    var html = "";
-    for (var i = 0; i < surface.length; i++) {
-      var row = surface[i] || {};
-      var isMut = !!row.mutating;
-      if (isMut) mutating++;
-      var argNames = argsByOp[row.op] || [];
-      html +=
-        '<div class="wallitem' + (isMut ? " mut" : "") + '">' +
-          '<div class="wop">' + esc(row.op) +
-            (isMut ? '<span class="wtag">MUTATING</span>' : "") +
-          '</div>' +
-          '<div class="wmeta">' +
-            '<span>' + esc(row.resource !== undefined ? row.resource : "* (any)") + '</span>' +
-            '<span>constraints: ' + esc(row.constraints !== undefined ? row.constraints : "none") + '</span>' +
-            '<span>uses: ' + esc(row.uses !== undefined ? row.uses : "unlimited") + '</span>' +
-          '</div>' +
-          (argNames.length
-            ? '<div class="wargs">' + esc(argNames.join(", ")) + " — any value</div>"
-            : "") +
-        '</div>';
-    }
-    html += '<div id="wallfoot">no expiry &nbsp;·&nbsp; no resource binding &nbsp;·&nbsp; no revocation &nbsp;·&nbsp; one string, forever</div>';
-    wall.innerHTML = html;
-    $("surface-count").textContent =
-      surface.length + " operations · " + mutating + " mutating · unbounded";
-    catalogLoaded = true;
-  }
-
-  function loadCatalog() {
-    getJSON("/catalog").then(function (data) {
-      var ops = (data && data.operations) || [];
-      var argsByOp = {};
-      for (var k = 0; k < ops.length; k++) {
-        argsByOp[ops[k].op] = ops[k].args ? Object.keys(ops[k].args) : [];
-      }
-      var surface = (data && data.full_surface) || [];
-      if (!surface.length && data && data.operations) {
-        // tolerate a broker that only ships `operations`
-        surface = data.operations.map(function (o) {
-          return { op: o.op, resource: "* (any)", constraints: "none", uses: "unlimited", mutating: !!o.mutating };
-        });
-      }
-      renderWall(surface, argsByOp);
-    }).catch(function () {
-      $("surface-count").textContent = "catalog unavailable — retrying…";
-      $("wall").innerHTML =
-        '<div class="empty"><div class="etitle">Waiting for the broker</div>' +
-        '<div class="enote">GET /catalog is not answering on localhost:8100 yet. ' +
-        'This column fills in the moment it does.</div></div>';
-      setTimeout(loadCatalog, 2000);
-    });
-  }
-
-  /* =====================================================================
-     LEFT PANEL — the warrant
-     ===================================================================== */
-
-  var activeWarrant = null;
-  var activeUsed = [];
-  var activeSealed = false;
-  var activeClosed = null;
-  var warrantEndpointMissing = false;
-
-  function shortId(id) {
-    if (!id || id === "-" || id === "?") return "—";
-    var s = String(id);
-    return s.length > 10 ? s.slice(0, 8) : s;
-  }
-
-  function fmtConstraints(c) {
-    if (!c) return null;
-    var keys = Object.keys(c);
-    if (!keys.length) return null;
-    var parts = [];
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i], v = c[k] || {}, bits = [];
-      if (v.lte !== null && v.lte !== undefined) bits.push("≤ " + v.lte);
-      if (v.gte !== null && v.gte !== undefined) bits.push("≥ " + v.gte);
-      if (v.eq !== null && v.eq !== undefined) bits.push("= " + v.eq);
-      if (v.one_of !== null && v.one_of !== undefined) bits.push("∈ [" + v.one_of.join(", ") + "]");
-      parts.push(k + " " + (bits.length ? bits.join(" and ") : "(unbounded)"));
-    }
-    return parts.join("  ·  ");
-  }
-
-  function warrantEmptyState() {
-    return '' +
-      '<div class="empty">' +
-        '<div class="etitle">No warrant is active yet.</div>' +
-        '<div class="estep"><i>1.</i> a human writes one task statement</div>' +
-        '<div class="estep"><i>2.</i> it is derived into the fewest grants that task needs</div>' +
-        '<div class="estep"><i>3.</i> each grant is pinned to a resource id, bounded, budgeted, signed</div>' +
-        '<div class="estep"><i>4.</i> it appears here — bright, short, and counting down</div>' +
-        '<div class="enote">Everything on the left of this divider is what a plain API key hands over. ' +
-        'What appears on this side is all the agent will be able to do.</div>' +
-      '</div>';
-  }
-
-  function lineageHtml(w, sealed, closed) {
-    if (!w) return "";
-    var depth = typeof w.depth === "number" ? w.depth : 0;
-    var isDel = !!(w.parent_id) || depth > 0;
-    var html = '<div class="lineage">';
-    html += '<div class="lrow">';
-    html += '<span class="ltag' + (isDel ? " del" : "") + '">' + (isDel ? "delegated" : "root") + '</span>';
-    if (sealed) html += '<span class="ltag sealed">sealed</span>';
-    if (closed) html += '<span class="ltag closed">closed</span>';
-    html += '<span class="lk">agent</span><span class="lv">' + esc(w.agent || "—") + '</span>';
-    html += '<span class="lk">warrant</span><span class="lv">' + esc(shortId(w.warrant_id)) + '</span>';
-    html += '</div>';
-    if (isDel) {
-      html += '<div class="lrow">';
-      html += '<span class="lk">from</span><span class="lv lparent">' + esc(shortId(w.parent_id)) + '</span>';
-      html += '<span class="lk">depth</span><span class="lv">' + esc(String(depth)) + '</span>';
-      html += '<span class="lk">principal</span><span class="lv">' + esc(w.principal || "—") + '</span>';
-      html += '</div>';
-    } else {
-      html += '<div class="lrow">';
-      html += '<span class="lk">principal</span><span class="lv">' + esc(w.principal || "—") + '</span>';
-      html += '<span class="lk">task</span><span class="lv">' + esc(shortId(w.task_id)) + '</span>';
-      html += '</div>';
-    }
-    if (closed) {
-      html += '<div class="lrow"><span class="lk">closed</span><span class="lv">' +
-        esc(String(closed)) + '</span></div>';
-    }
-    html += '</div>';
-    return html;
-  }
-
-  function renderWarrant(w, used, sealed, closed) {
-    var grantsEl = $("grants");
-    used = used || [];
-    sealed = !!sealed;
-    closed = closed || null;
-
-    if (!w) {
-      $("task-text").textContent = "— no warrant minted yet —";
-      $("warrant-count").textContent = "no active warrant";
-      $("ttlbox").style.display = "none";
-      grantsEl.innerHTML = warrantEmptyState();
-      return;
-    }
-
-    $("task-text").textContent = w.task_statement || "(no task statement)";
-
-    var grants = w.grants || [];
-    var wild = 0, exhausted = 0;
-    var html = lineageHtml(w, sealed, closed);
-    for (var i = 0; i < grants.length; i++) {
-      var g = grants[i] || {};
-      var res = g.resource === undefined || g.resource === null ? "*" : String(g.resource);
-      var isWild = /:\*$/.test(res) || res === "*";
-      if (isWild) wild++;
-      var cons = fmtConstraints(g.constraints);
-      var uses = (g.uses === undefined || g.uses === null) ? 1 : g.uses;
-
-      // `used` is index-aligned with `grants` (broker /warrant/active).
-      var spent = (typeof used[i] === "number") ? used[i] : 0;
-      var left = Math.max(0, uses - spent);
-      var isDone = left === 0;
-      if (isDone) exhausted++;
-
-      html +=
-        '<div class="grant' + (isWild ? " wild" : "") + (isDone ? " exhausted" : "") + '">' +
-          '<div class="gop">' + esc(g.op) + (isWild ? '<span class="gbadge">WIDENED</span>' : "") + '</div>' +
-          '<div class="grow"><span class="gk">resource</span><span class="gv">' + esc(res) + '</span></div>' +
-          '<div class="grow"><span class="gk">bounds</span><span class="gv' + (cons ? "" : " none") + '">' +
-            esc(cons || "none declared") + '</span></div>' +
-          '<div class="grow"><span class="gk">budget</span><span class="gv budget">' +
-            esc(left) + " of " + esc(uses) + ' left' +
-            '<span class="spent"> &nbsp;· ' + esc(spent) +
-            (spent === 1 ? " call spent" : " calls spent") + '</span></span></div>' +
-          (g.justification ? '<div class="gjust">“' + esc(g.justification) + '”</div>' : "") +
-        '</div>';
-    }
-
-    if (!grants.length) {
-      html += '<div class="empty"><div class="etitle">Warrant carries zero grants.</div>' +
-             '<div class="enote">Every call this agent makes will be denied.</div></div>';
-    }
-
-    grantsEl.innerHTML = html;
-    var depth = typeof w.depth === "number" ? w.depth : 0;
-    $("warrant-count").textContent =
-      grants.length + (grants.length === 1 ? " grant" : " grants") +
-      (wild ? " · " + wild + " widened" : " · all pinned to a resource") +
-      (exhausted ? " · " + exhausted + " spent" : "") +
-      (depth > 0 ? " · depth " + depth : "") +
-      (sealed ? " · sealed" : "") +
-      (closed ? " · closed" : "");
-  }
-
-  function sameWarrant(a, b) {
-    if (!a && !b) return true;
-    if (!a || !b) return false;
-    return a.warrant_id === b.warrant_id && a.expires_at === b.expires_at &&
-           (a.grants || []).length === (b.grants || []).length &&
-           a.parent_id === b.parent_id && a.depth === b.depth &&
-           a.agent === b.agent;
-  }
-
-  function sameUsed(a, b) {
-    a = a || []; b = b || [];
-    if (a.length !== b.length) return false;
-    for (var i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-    return true;
-  }
-
-  function pollWarrant() {
-    if (warrantEndpointMissing) return;
-    getJSON("/warrant/active").then(function (data) {
-      var w = data ? data.warrant : null;
-      var u = (data && data.used) || [];
-      var sealed = !!(data && data.sealed);
-      var closed = (data && data.closed) || null;
-      if (!sameWarrant(w, activeWarrant) || !sameUsed(u, activeUsed) ||
-          sealed !== activeSealed || closed !== activeClosed) {
-        activeWarrant = w || null;
-        activeUsed = u;
-        activeSealed = sealed;
-        activeClosed = closed;
-        renderWarrant(activeWarrant, activeUsed, activeSealed, activeClosed);
-      }
-    }).catch(function (err) {
-      if (err && err.status === 404) {
-        // Contract does not promise this endpoint. Degrade, don't error.
-        warrantEndpointMissing = true;
-        activeWarrant = null;
-        $("diff").classList.add("no-warrant");
-        $("left-sub").textContent = "the full surface a plain API key hands over";
-        $("taskline").style.display = "none";
-      }
-      // any other failure: broker restarting — the next tick retries
-    });
-  }
-
-  /* =====================================================================
-     TTL countdown
-     ===================================================================== */
-
-  function pad2(n) { return (n < 10 ? "0" : "") + n; }
-
-  function tickTTL() {
-    var box = $("ttlbox");
-    if (!activeWarrant || !activeWarrant.expires_at) {
-      box.style.display = "none";
-      return;
-    }
-    box.style.display = "";
-
-    var now = Date.now() / 1000;
-    var remain = activeWarrant.expires_at - now;
-    var issued = activeWarrant.issued_at || (activeWarrant.expires_at - 300);
-    var total = Math.max(1, activeWarrant.expires_at - issued);
-
-    box.classList.remove("warn", "crit", "dead");
-    if (remain <= 0) {
-      $("ttlclock").textContent = "EXPIRED";
-      $("ttlfill").style.width = "0%";
-      box.classList.add("dead");
-      return;
-    }
-
-    var m = Math.floor(remain / 60);
-    var s = Math.floor(remain % 60);
-    var t = Math.floor((remain * 10) % 10);
-    $("ttlclock").textContent = pad2(m) + ":" + pad2(s) + "." + t;
-    $("ttlfill").style.width = Math.max(0, Math.min(100, (remain / total) * 100)).toFixed(2) + "%";
-    if (remain < 15) box.classList.add("crit");
-    else if (remain < 60) box.classList.add("warn");
-  }
-
-  /* =====================================================================
-     RIGHT PANEL — audit
-     ===================================================================== */
-
-  var seen = Object.create(null);
-  var order = [];              // entry_ids, newest first
-  var MAX_ROWS = 250;
-  var nAllow = 0, nDeny = 0, nCtrl = 0;
-  var listEl = $("auditlist");
-
-  // Lifecycle ops written by _control_audit. They share the audit stream with
-  // /call decisions but are not upstream authorizations — tallying them as
-  // ALLOW inflates the demo score, and their `resource` field is often a task
-  // id, which is not what the resource column means for call-plane rows.
-  function isControlPlane(op) {
-    if (!op) return false;
-    return op === "catalog.register" || op.indexOf("warrant.") === 0;
-  }
-
-  function controlVerb(op) {
-    var parts = String(op || "").split(".");
-    return (parts[parts.length - 1] || op || "?").toUpperCase();
-  }
-
-  function controlSubject(e) {
-    // Never put a raw task UUID in the resource column. Pick the subject the
-    // lifecycle event is actually about.
-    var args = e.args || {};
-    var op = e.op || "";
-    if (op === "warrant.delegate") {
-      var parent = shortId(args.parent_id || e.resource);
-      var agent = args.agent || e.agent || "—";
-      return parent + " → " + agent;
-    }
-    if (op === "catalog.register") {
-      return args.namespace ? String(args.namespace) : "catalog";
-    }
-    if (op === "warrant.close" || op === "warrant.revoke") {
-      // These endpoints already put the warrant id in `resource` on some paths.
-      var target = e.resource;
-      if (!target || target === "-" || target === e.task_id) {
-        target = e.warrant_id;
-      }
-      return shortId(target);
-    }
-    if (op === "warrant.mint" || op === "warrant.release") {
-      if (e.agent && e.agent !== "unknown") return String(e.agent);
-      if (e.warrant_id && e.warrant_id !== "-") return shortId(e.warrant_id);
-      return "—";
-    }
-    // Unknown control op: still refuse to echo a task id as a resource.
-    if (e.resource && e.resource !== "-" && e.resource !== e.task_id) {
-      return shortId(e.resource);
-    }
-    return "—";
-  }
-
-  function emptyAudit() {
-    listEl.innerHTML =
-      '<div class="empty">' +
-        '<div class="etitle">Nothing has been attempted yet.</div>' +
-        '<div class="enote">Every call the agent makes lands here, in order, as the broker decides it. ' +
-        'The agent holds no credential — this stream is the only way anything reaches a real service.</div>' +
-        '<div class="estep" style="margin-top:.5rem"><i>ALLOW</i> &nbsp;the call was inside the warrant; the broker attached the real key</div>' +
-        '<div class="estep"><i>DENY</i> &nbsp;&nbsp;the call left the warrant; the reason column says exactly how</div>' +
-        '<div class="estep"><i>ctrl</i> &nbsp;&nbsp;mint / delegate / release / close — authority changing, not a call</div>' +
-      '</div>';
-  }
-
-  function fmtTime(ts) {
-    var d = new Date((ts || 0) * 1000);
-    if (isNaN(d.getTime())) return "--:--:--";
-    return pad2(d.getHours()) + ":" + pad2(d.getMinutes()) + ":" + pad2(d.getSeconds());
-  }
-
-  function fmtArgs(args) {
-    if (!args) return "";
-    var keys = Object.keys(args);
-    if (!keys.length) return "";
-    var parts = [];
-    for (var i = 0; i < keys.length; i++) {
-      var k = keys[i];
-      // task_statement is already on the left panel; don't duplicate a paragraph
-      // under every mint row.
-      if (k === "task_statement") continue;
-      var v = args[k];
-      if (typeof v === "string" && v.length > 60) v = v.slice(0, 57) + "…";
-      if (k === "parent_id" || k === "warrant_id") v = shortId(v);
-      if (Array.isArray(v)) v = "[" + v.length + "]";
-      parts.push(k + "=" + (typeof v === "object" ? JSON.stringify(v) : v));
-    }
-    return parts.join("  ");
-  }
-
-  function buildRow(e, animate) {
-    var ctrl = isControlPlane(e.op);
-    var deny = e.decision === "DENY";
-    var div = document.createElement("div");
-    var kind = ctrl ? ("ctrl" + (deny ? " deny" : "")) : (deny ? "deny" : "allow");
-    div.className = "entry arow " + kind + (animate ? " flash" : "");
-
-    var subject = ctrl ? controlSubject(e) : (e.resource || "—");
-    var decision = ctrl
-      ? (deny ? "DENY" : controlVerb(e.op))
-      : (e.decision || "?");
-
-    var argstr = fmtArgs(e.args);
-    div.innerHTML =
-      '<div class="c-time">' + esc(fmtTime(e.ts)) + '</div>' +
-      '<div class="c-op">' + esc(e.op) + '</div>' +
-      '<div class="c-res">' + esc(subject) + '</div>' +
-      '<div class="c-dec">' + esc(decision) + '</div>' +
-      '<div class="c-reason">' + esc(e.reason) + '</div>' +
-      (argstr ? '<div class="c-args">' + esc(argstr) + '</div>' : "");
-    return div;
-  }
-
-  function updateTally() {
-    $("n-allow").textContent = nAllow + " ALLOW";
-    $("n-deny").textContent = nDeny + " DENY";
-    $("n-ctrl").textContent = nCtrl + " ctrl";
-  }
-
-  function idOf(e) {
-    return e.entry_id || (String(e.ts) + "|" + e.op + "|" + e.resource + "|" + e.decision + "|" + e.reason);
-  }
-
-  function addEntry(e, animate) {
-    if (!e || typeof e !== "object") return false;
-    var id = idOf(e);
-    if (seen[id]) return false;
-    seen[id] = true;
-
-    if (!order.length) listEl.innerHTML = "";
-    order.unshift(id);
-
-    if (isControlPlane(e.op)) {
-      nCtrl++;
-    } else if (e.decision === "DENY") {
-      nDeny++;
-    } else {
-      nAllow++;
-    }
-    updateTally();
-
-    listEl.insertBefore(buildRow(e, animate), listEl.firstChild);
-
-    while (order.length > MAX_ROWS) {
-      order.pop();
-      if (listEl.lastChild) listEl.removeChild(listEl.lastChild);
-    }
-    if (animate) listEl.scrollTop = 0;
-    return true;
-  }
-
-  // Backfill. /audit is newest-last, so walk it forward and prepend each —
-  // the result reads newest-first.
-  function backfill() {
-    return getJSON("/audit").then(function (data) {
-      var entries = (data && data.entries) || [];
-      var added = 0;
-      for (var i = 0; i < entries.length; i++) if (addEntry(entries[i], false)) added++;
-      if (!order.length) emptyAudit();
-      return added;
-    }).catch(function () {
-      if (!order.length) emptyAudit();
-      return 0;
-    });
-  }
-
-  /* ---- SSE with self-healing reconnect ---- */
-
-  var es = null, retry = 0, retryTimer = null;
-
-  function setConn(state, text) {
-    var el = $("conn");
-    el.className = state;
-    $("conntext").textContent = text;
-  }
-
-  function connect() {
-    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
-    if (es) { try { es.close(); } catch (_) {} es = null; }
-
-    setConn("wait", retry ? "reconnecting" : "connecting");
-
-    try {
-      es = new EventSource(API + "/audit/stream");
-    } catch (_) {
-      scheduleReconnect();
-      return;
-    }
-
-    es.onopen = function () {
-      retry = 0;
-      setConn("live", "live");
-      // fill any gap that opened while we were disconnected
-      backfill();
-    };
-
-    es.onmessage = function (ev) {
-      if (!ev.data) return;
-      var e;
-      try { e = JSON.parse(ev.data); } catch (_) { return; }
-      addEntry(e, true);
-      // An ALLOW just spent budget; refresh the left panel now rather than waiting
-      // for the next poll, so "1 of 1 left" -> "0 of 1 left" lands with the row.
-      // Control-plane rows do not spend call budgets — skip them.
-      if (!isControlPlane(e.op) && e.decision === "ALLOW") pollWarrant();
-      // Mint / delegate / close change which warrant is active or its lineage.
-      if (isControlPlane(e.op) && e.decision === "ALLOW") pollWarrant();
-      if ($("conn").className !== "live") setConn("live", "live");
-    };
-
-    es.onerror = function () {
-      setConn("down", "disconnected");
-      if (!es || es.readyState === 2 /* CLOSED */) scheduleReconnect();
-    };
-  }
-
-  function scheduleReconnect() {
-    if (retryTimer) return;
-    if (es) { try { es.close(); } catch (_) {} es = null; }
-    retry++;
-    var delay = Math.min(1000 * Math.pow(1.6, Math.min(retry, 6)), 10000);
-    retryTimer = setTimeout(function () { retryTimer = null; connect(); }, delay);
-  }
-
-  /* =====================================================================
-     boot
-     ===================================================================== */
-
-  renderWarrant(null);
-  emptyAudit();
-  loadCatalog();
-  pollWarrant();
-  backfill().then(connect);
-
-  setInterval(pollWarrant, 1500);
-  setInterval(tickTTL, 100);
-
-  // If the tab was backgrounded/asleep, re-sync on wake.
-  document.addEventListener("visibilitychange", function () {
-    if (!document.hidden) {
-      pollWarrant();
-      if (!es || es.readyState === 2) connect(); else backfill();
-    }
-  });
-})();
-</script>
 </body>
 </html>

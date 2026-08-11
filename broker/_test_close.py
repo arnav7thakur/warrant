@@ -370,7 +370,7 @@ def test_cascade_to_children() -> None:
         if response.status_code != 200:
             check(False, "minted a root warrant to delegate from",
                   f"HTTP {response.status_code}: {reason_of(response)[:180]}. This test "
-                  "needs ANTHROPIC_API_KEY and the operator key; the rest of the suite "
+                  "needs GEMINI_API_KEY and the operator key; the rest of the suite "
                   "does not.")
             return
         minted = response.json()

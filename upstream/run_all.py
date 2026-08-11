@@ -1,10 +1,9 @@
-"""Start all three upstream services at once.
+"""Start upstream services declared in core.catalog.SERVICE_PORTS.
 
-    C:\\Users\\ASUS\\ptp\\warrant\\.venv\\Scripts\\python.exe -m upstream.run_all
+    python -m upstream.run_all
 
-Ports come from core.catalog.SERVICE_PORTS -- they are not restated here. One spawned
-process per service (Windows-safe: spawn start method, top-level target function,
-__main__ guard). Ctrl-C stops all three.
+Only services that both appear in SERVICE_PORTS and have a known app mapping are
+started — so WARRANT_BUILTINS=0 + a helpdesk manifest starts only helpdesk.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ APPS = {
     "commerce": "upstream.commerce:app",
     "support": "upstream.support:app",
     "comms": "upstream.comms:app",
+    "helpdesk": "upstream.helpdesk:app",
 }
 
 
@@ -44,8 +44,20 @@ def main() -> int:
     ctx = mp.get_context("spawn")
     procs: list[tuple[str, mp.process.BaseProcess]] = []
 
-    for service, import_string in APPS.items():
-        port = SERVICE_PORTS[service]
+    to_start = [
+        (service, APPS[service], SERVICE_PORTS[service])
+        for service in SERVICE_PORTS
+        if service in APPS
+    ]
+    if not to_start:
+        print(
+            "[run_all] no known upstreams in SERVICE_PORTS. "
+            "Set WARRANT_BUILTINS=1 or load a manifest that declares a mapped service.",
+            flush=True,
+        )
+        return 1
+
+    for service, import_string, port in to_start:
         proc = ctx.Process(
             target=_serve,
             args=(import_string, port, str(REPO_ROOT)),
@@ -54,9 +66,12 @@ def main() -> int:
         )
         proc.start()
         procs.append((service, proc))
-        print(f"[run_all] {service:9s} -> http://127.0.0.1:{port}  (pid {proc.pid})", flush=True)
+        print(
+            f"[run_all] {service:9s} -> http://127.0.0.1:{port}  (pid {proc.pid})",
+            flush=True,
+        )
 
-    print("[run_all] all three upstreams starting. Ctrl-C to stop.", flush=True)
+    print(f"[run_all] {len(procs)} upstream(s) starting. Ctrl-C to stop.", flush=True)
 
     try:
         while True:

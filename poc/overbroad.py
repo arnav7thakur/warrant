@@ -5,7 +5,9 @@ derivation could possibly get it -- wildcards on every operation -- and then sig
 the real key, so it is cryptographically indistinguishable from one the broker issued.
 Enforcement does not know or care where a grant came from.
 
-    python -m demo.overbroad [--port 8100]
+    python -m poc.overbroad [--port 8100]
+
+POC theatre — product enforcement coverage lives in `python -m core._test_enforce`.
 """
 
 from __future__ import annotations

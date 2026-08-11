@@ -51,3 +51,7 @@ CONTRACTS.md
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Cursor / local agent tooling (not part of the Warrant product)
+.agents/
+skills-lock.json

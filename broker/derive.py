@@ -38,15 +38,15 @@ import re
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from google.genai import types as genai_types
 from pydantic import ValidationError
 
 from core.catalog import CATALOG, describe_for_model
+from core.llm import LLMConfigError, client as llm_client, model_name
 from core.models import Grant
 
-MODEL = "claude-sonnet-5"
+MODEL = model_name()  # overridable via WARRANT_LLM_MODEL; resolved at call time too
 TOOL_NAME = "emit_warrant"
-MAX_TOKENS = 8000
 MAX_ATTEMPTS = 2
 
 
@@ -409,10 +409,19 @@ def _user_message(task_statement: str) -> str:
 # Structured output: an input_schema mirroring core.models.Grant.
 # --------------------------------------------------------------------------------------
 
-_CONSTRAINT_SCHEMA: dict[str, Any] = {
+# Gemini rejects JSON Schema fields like `additionalProperties`. Constraints are
+# therefore an array of {arg, …bounds} entries and folded into a dict before validation.
+_CONSTRAINT_ENTRY_SCHEMA: dict[str, Any] = {
     "type": "object",
-    "description": "Bounds on one argument. All present fields must hold at call time.",
+    "description": (
+        "One argument bound. `arg` is the argument name; all other present fields "
+        "must hold at call time."
+    ),
     "properties": {
+        "arg": {
+            "type": "string",
+            "description": "Argument name on the operation (e.g. amount, duration_hours).",
+        },
         "lte": {"type": "number", "description": "Argument must be <= this value."},
         "gte": {"type": "number", "description": "Argument must be >= this value."},
         "eq": {"type": "string", "description": "Argument must equal this exact string."},
@@ -422,18 +431,43 @@ _CONSTRAINT_SCHEMA: dict[str, Any] = {
             "description": "Argument must be one of these exact strings.",
         },
     },
-    "additionalProperties": False,
+    "required": ["arg"],
 }
 
 
-def _tool_definition() -> dict[str, Any]:
-    return {
-        "name": TOOL_NAME,
-        "description": (
+def _constraints_to_dict(raw_constraints: Any, op_name: str) -> dict[str, Any]:
+    """Accept either a dict map or Gemini's array-of-entries shape."""
+    if raw_constraints is None:
+        return {}
+    if isinstance(raw_constraints, dict):
+        return raw_constraints
+    if isinstance(raw_constraints, list):
+        out: dict[str, Any] = {}
+        for index, entry in enumerate(raw_constraints):
+            if not isinstance(entry, dict):
+                raise DerivationError(
+                    f"grant for {op_name!r} has a non-object constraint entry #{index}"
+                )
+            arg = str(entry.get("arg", "")).strip()
+            if not arg:
+                raise DerivationError(
+                    f"grant for {op_name!r} has a constraint entry with no arg name"
+                )
+            bound = {k: v for k, v in entry.items() if k != "arg" and v is not None}
+            out[arg] = bound
+        return out
+    raise DerivationError(f"grant for {op_name!r} has non-object constraints")
+
+
+def _tool_declaration() -> genai_types.FunctionDeclaration:
+    """Gemini function declaration mirroring core.models.Grant."""
+    return genai_types.FunctionDeclaration(
+        name=TOOL_NAME,
+        description=(
             "Emit the minimum warrant for the task statement: your reasoning, plus the "
             "scoped, bounded, budgeted grants the task requires."
         ),
-        "input_schema": {
+        parameters={
             "type": "object",
             "properties": {
                 "reasoning": {
@@ -465,20 +499,20 @@ def _tool_definition() -> dict[str, Any]:
                                 ),
                             },
                             "constraints": {
-                                "type": "object",
+                                "type": "array",
                                 "description": (
-                                    "Map of argument name -> bound. Every [constrainable] "
-                                    "argument of this operation must appear here."
+                                    "One entry per bounded argument. Every [constrainable] "
+                                    "argument of this operation must appear here as "
+                                    "`{arg, lte|gte|eq|one_of}`."
                                 ),
-                                "additionalProperties": _CONSTRAINT_SCHEMA,
+                                "items": _CONSTRAINT_ENTRY_SCHEMA,
                             },
                             "uses": {
                                 "type": "integer",
-                                "minimum": 1,
                                 "description": (
                                     "How many times the task plausibly needs this "
                                     "operation. 1 for mutating operations unless the task "
-                                    "clearly describes more."
+                                    "clearly describes more. Minimum 1."
                                 ),
                             },
                             "justification": {
@@ -489,12 +523,30 @@ def _tool_definition() -> dict[str, Any]:
                                 ),
                             },
                         },
-                        "required": ["op", "resource", "constraints", "uses", "justification"],
+                        "required": [
+                            "op",
+                            "resource",
+                            "constraints",
+                            "uses",
+                            "justification",
+                        ],
                     },
                 },
             },
             "required": ["reasoning", "grants"],
         },
+    )
+
+
+# Keep the old name so any external import of `_tool_definition` still resolves to
+# something callable that returns a declaration-shaped object for tests that only
+# inspect keys. Prefer `_tool_declaration` in this module.
+def _tool_definition() -> dict[str, Any]:
+    decl = _tool_declaration()
+    return {
+        "name": decl.name,
+        "description": decl.description,
+        "input_schema": decl.parameters,
     }
 
 
@@ -560,9 +612,7 @@ def _validate_grants(raw_grants: Any, policy: Policy) -> tuple[list[Grant], list
 
         resource = _normalise_resource(op_name, raw.get("resource"))
 
-        raw_constraints = raw.get("constraints") or {}
-        if not isinstance(raw_constraints, dict):
-            raise DerivationError(f"grant for {op_name!r} has non-object constraints")
+        raw_constraints = _constraints_to_dict(raw.get("constraints"), op_name)
         constraints: dict[str, Any] = {}
         for arg, bound in raw_constraints.items():
             if arg not in op.args:
@@ -640,18 +690,29 @@ def _validate_grants(raw_grants: Any, policy: Policy) -> tuple[list[Grant], list
 
 
 def _extract_tool_input(response: Any) -> dict[str, Any]:
-    if getattr(response, "stop_reason", None) == "refusal":
-        raise DerivationError("model refused to derive a warrant for this task statement")
-    for block in response.content:
-        if getattr(block, "type", None) == "tool_use" and block.name == TOOL_NAME:
-            payload = block.input
-            if not isinstance(payload, dict):
-                raise DerivationError("model returned a non-object tool input")
-            return payload
-    raise DerivationError(
-        f"model did not call {TOOL_NAME!r} (stop_reason="
-        f"{getattr(response, 'stop_reason', None)!r})"
-    )
+    """Pull the forced emit_warrant function-call args out of a Gemini response."""
+    candidates = getattr(response, "candidates", None) or []
+    if not candidates:
+        raise DerivationError("model returned no candidates")
+    content = getattr(candidates[0], "content", None)
+    parts = getattr(content, "parts", None) or []
+    for part in parts:
+        fn = getattr(part, "function_call", None)
+        if fn is None:
+            continue
+        if getattr(fn, "name", None) != TOOL_NAME:
+            continue
+        raw_args = getattr(fn, "args", None)
+        if raw_args is None:
+            raise DerivationError("model returned an empty tool call")
+        if hasattr(raw_args, "items"):
+            payload = dict(raw_args)
+        elif isinstance(raw_args, dict):
+            payload = raw_args
+        else:
+            raise DerivationError("model returned a non-object tool input")
+        return payload
+    raise DerivationError(f"model did not call {TOOL_NAME!r}")
 
 
 async def derive_grants(task_statement: str) -> tuple[list[Grant], str]:
@@ -659,8 +720,12 @@ async def derive_grants(task_statement: str) -> tuple[list[Grant], str]:
     if not isinstance(task_statement, str) or not task_statement.strip():
         raise DerivationError("task statement is empty")
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        raise DerivationError("ANTHROPIC_API_KEY is not set")
+    try:
+        client = llm_client()
+    except LLMConfigError as exc:
+        raise DerivationError(str(exc)) from exc
+
+    model = model_name()
 
     # Loaded once per derivation so the prompt and the post-validation clamp cannot
     # disagree, and read here rather than at import so a policy edit does not need a
@@ -668,59 +733,70 @@ async def derive_grants(task_statement: str) -> tuple[list[Grant], str]:
     policy = load_policy()
     system_prompt = _system_prompt(policy)
 
-    client = AsyncAnthropic()
-    messages: list[dict[str, Any]] = [
-        {"role": "user", "content": _user_message(task_statement)}
+    contents: list[Any] = [
+        genai_types.Content(
+            role="user",
+            parts=[genai_types.Part.from_text(text=_user_message(task_statement))],
+        )
     ]
+    config = genai_types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        tools=[genai_types.Tool(function_declarations=[_tool_declaration()])],
+        tool_config=genai_types.ToolConfig(
+            function_calling_config=genai_types.FunctionCallingConfig(
+                mode="ANY",
+                allowed_function_names=[TOOL_NAME],
+            )
+        ),
+        temperature=0.2,
+    )
 
     last_error: DerivationError | None = None
-    try:
-        for _ in range(MAX_ATTEMPTS):
-            try:
-                response = await client.messages.create(
-                    model=MODEL,
-                    max_tokens=MAX_TOKENS,
-                    system=system_prompt,
-                    messages=messages,
-                    tools=[_tool_definition()],
-                    tool_choice={"type": "tool", "name": TOOL_NAME},
+    for _ in range(MAX_ATTEMPTS):
+        try:
+            response = await client.aio.models.generate_content(
+                model=model,
+                contents=contents,
+                config=config,
+            )
+        except DerivationError:
+            raise
+        except Exception as exc:  # API / connection errors
+            raise DerivationError(f"model call failed: {exc}") from exc
+
+        payload = _extract_tool_input(response)
+        reasoning = str(payload.get("reasoning", "")).strip()
+
+        try:
+            grants, notes = _validate_grants(payload.get("grants"), policy)
+        except DerivationError as exc:
+            last_error = exc
+            contents = contents + [
+                genai_types.Content(
+                    role="user",
+                    parts=[
+                        genai_types.Part.from_text(
+                            text=(
+                                "Your previous warrant was rejected by the broker's validator:\n"
+                                f"  {exc}\n\n"
+                                "Here is what you produced:\n"
+                                f"{json.dumps(payload.get('grants'), indent=2, default=str)}\n\n"
+                                "Emit the warrant again for the same task statement, fixing only "
+                                f"that problem. Call {TOOL_NAME} once. Do not widen any resource, "
+                                "add any operation, or raise any bound while fixing it."
+                            )
+                        )
+                    ],
                 )
-            except DerivationError:
-                raise
-            except Exception as exc:  # anthropic APIError, connection errors, ...
-                raise DerivationError(f"model call failed: {exc}") from exc
+            ]
+            continue
 
-            payload = _extract_tool_input(response)
-            reasoning = str(payload.get("reasoning", "")).strip()
-
-            try:
-                grants, notes = _validate_grants(payload.get("grants"), policy)
-            except DerivationError as exc:
-                last_error = exc
-                messages = messages + [
-                    {
-                        "role": "user",
-                        "content": (
-                            "Your previous warrant was rejected by the broker's validator:\n"
-                            f"  {exc}\n\n"
-                            "Here is what you produced:\n"
-                            f"{json.dumps(payload.get('grants'), indent=2, default=str)}\n\n"
-                            "Emit the warrant again for the same task statement, fixing only "
-                            f"that problem. Call {TOOL_NAME} once. Do not widen any resource, "
-                            "add any operation, or raise any bound while fixing it."
-                        ),
-                    }
-                ]
-                continue
-
-            if notes:
-                # Surfaced through the existing return value -- the broker stores it with
-                # the mint and the UI shows it, so a dropped grant is visible to the human
-                # who has to decide what to do about it, not swallowed.
-                reasoning = "\n\n".join([reasoning, *notes]).strip()
-            return grants, reasoning
-    finally:
-        await client.close()
+        if notes:
+            # Surfaced through the existing return value -- the broker stores it with
+            # the mint and the UI shows it, so a dropped grant is visible to the human
+            # who has to decide what to do about it, not swallowed.
+            reasoning = "\n\n".join([reasoning, *notes]).strip()
+        return grants, reasoning
 
     raise DerivationError(
         f"derivation produced an invalid warrant after {MAX_ATTEMPTS} attempts: {last_error}"

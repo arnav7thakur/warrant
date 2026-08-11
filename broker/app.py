@@ -60,7 +60,15 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
-from core.catalog import CATALOG, SERVICE_BASE, CatalogError, describe_for_model, full_surface
+from core.catalog import (
+    CATALOG,
+    SERVICE_BASE,
+    CatalogError,
+    catalog_meta,
+    credential_for,
+    describe_for_model,
+    full_surface,
+)
 from core.catalog import register as catalog_register
 from core.delegate import AttenuationError, DelegationLedger, attenuate
 from core.enforce import evaluate, use_key
@@ -70,6 +78,8 @@ from core.sign import decode, encode, sign, verify
 from .store import Store
 
 UPSTREAM_KEY = os.environ.get("UPSTREAM_KEY", "real-service-key-abc123")
+# Kept for docs/compat. Forwarding uses core.catalog.credential_for(service), which
+# checks WARRANT_CREDENTIAL_<SERVICE> then falls back to this value.
 
 # The operator credential. Self-labelling default, same pattern as UPSTREAM_KEY: the
 # demo works out of the box, and the value on screen says what it is. Whoever holds
@@ -77,6 +87,7 @@ UPSTREAM_KEY = os.environ.get("UPSTREAM_KEY", "real-service-key-abc123")
 OPERATOR_KEY = os.environ.get("OPERATOR_KEY", "operator-key-change-me")
 
 UI_FILE = Path(__file__).resolve().parent.parent / "ui" / "index.html"
+UI_CONSOLE_FILE = Path(__file__).resolve().parent.parent / "ui" / "console.html"
 
 MINT_OP = "warrant.mint"
 RELEASE_OP = "warrant.release"
@@ -159,6 +170,11 @@ class CatalogRegisterRequest(BaseModel):
     operations: list[dict[str, Any]] = Field(default_factory=list)
     namespace: str | None = None
     services: dict[str, Any] | None = None
+    credentials: dict[str, str] | None = None
+    name: str | None = None
+    owner: str | None = None
+    version: str | None = None
+    description: str | None = None
 
 
 class DelegateRequest(BaseModel):
@@ -281,6 +297,9 @@ def _cascade_close(warrant_id: str, reason: str, closed_by: str) -> tuple[list[s
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from core.llm import load_dotenv
+
+    load_dotenv()
     app.state.http = httpx.AsyncClient(timeout=10.0)
     yield
     await app.state.http.aclose()
@@ -291,6 +310,7 @@ app = FastAPI(title="Warrant Broker", lifespan=lifespan)
 
 @app.get("/catalog")
 async def get_catalog() -> dict[str, Any]:
+    meta = catalog_meta()
     return {
         "operations": [
             {
@@ -300,10 +320,17 @@ async def get_catalog() -> dict[str, Any]:
                 "args": op.args,
                 "constrainable": op.constrainable,
                 "resource_type": op.resource_type,
+                "resource_param": op.resource_param,
+                "service": op.service,
             }
             for op in CATALOG.values()
         ],
         "full_surface": full_surface(),
+        "builtins": meta["builtins"],
+        "namespaces": meta["namespaces"],
+        "projects": meta["projects"],
+        "project": meta["projects"][-1] if meta["projects"] else None,
+        "operation_count": meta["operation_count"],
     }
 
 
@@ -359,6 +386,13 @@ async def register_operations(
             namespace=req.namespace,
             services=req.services,
             source="POST /catalog/register",
+            project={
+                "name": req.name,
+                "owner": req.owner,
+                "version": req.version,
+                "description": req.description,
+            },
+            credentials=req.credentials,
         )
     except CatalogError as exc:
         # Verbatim, multi-line and all. These messages name the rule and how to satisfy
@@ -685,6 +719,12 @@ async def delegate(req: DelegateRequest, x_warrant: str = Header(default="")):
         for _ in range(spent.get(key, 0) - before.get(key, 0)):
             STORE.spend(parent.warrant_id, index)
 
+    # Durable from the moment it exists, same as a root minted by /mint -- otherwise
+    # this child is real authority that only the roster at GET /warrants (and every
+    # other reader of the `warrants` table) cannot see. See record_warrant()'s
+    # docstring for why this is not set_active_warrant().
+    STORE.record_warrant(child)
+
     _control_audit(
         DELEGATE_OP,
         "ALLOW",
@@ -974,10 +1014,13 @@ async def revoke(req: RevokeRequest, x_operator_key: str = Header(default="")):
 
 @app.get("/warrant/active")
 async def active_warrant() -> dict[str, Any]:
-    """The live warrant plus how much of each grant's budget has been spent.
+    """The single warrant `/mint` last pointed at, plus how much it has spent.
 
-    `used` is index-aligned with `warrant.grants` so the UI can show "0 of 1 left"
-    rather than just the budget, which makes the exhaustion denial legible.
+    This answers one specific question -- "what would `/mint` refuse (409) right
+    now because it's sealed" -- and it is *not* "everyone currently holding
+    authority": a delegated sub-agent's warrant never touches this slot. For the
+    whole fleet, see `GET /warrants` below. `used` is index-aligned with
+    `warrant.grants` so a caller can show "0 of 1 left" rather than just the budget.
     """
     warrant = state.active_warrant
     if warrant is None:
@@ -989,6 +1032,74 @@ async def active_warrant() -> dict[str, Any]:
         # None while live. A string once the warrant has been given up or taken back --
         # the third way authority ends, and the only one that is not a timeout.
         "closed": STORE.is_closed(warrant.warrant_id),
+    }
+
+
+def _warrant_summary(warrant: Warrant, *, active_id: str | None) -> dict[str, Any]:
+    now = time.time()
+    closed = STORE.is_closed(warrant.warrant_id)
+    return {
+        "warrant_id": warrant.warrant_id,
+        "principal": warrant.principal,
+        "agent": warrant.agent,
+        "task_id": warrant.task_id,
+        "task_statement": warrant.task_statement,
+        "issued_at": warrant.issued_at,
+        "expires_at": warrant.expires_at,
+        "grant_count": len(warrant.grants),
+        "parent_id": warrant.parent_id,
+        "depth": warrant.depth,
+        "closed": closed,
+        "expired": warrant.expires_at <= now,
+        # Neither closed nor expired -- the two ways authority ends on its own,
+        # before a human /closes or /revokes it early. See broker/app.py's module
+        # docstring on "Closure".
+        "live": closed is None and warrant.expires_at > now,
+        "is_active_slot": warrant.warrant_id == active_id,
+    }
+
+
+@app.get("/warrants")
+async def list_warrants(limit: int = 200) -> dict[str, Any]:
+    """Every warrant on this broker -- every root `/mint` issued and every child
+    `/delegate` carved out of one -- most recent first.
+
+    This is the roster a fleet needs and `/warrant/active` structurally cannot be:
+    that endpoint answers for one slot, this answers for everyone currently (or
+    recently) holding authority, so a console can show N connected agents instead
+    of pretending there is only ever one. Each entry is a summary; fetch
+    `GET /warrant/{warrant_id}` for the grant-level detail on one, so this list
+    stays cheap regardless of how many agents are live.
+    """
+    active_id = state.active_warrant.warrant_id if state.active_warrant is not None else None
+    warrants = STORE.list_warrants(limit=limit)
+    return {
+        "warrants": [_warrant_summary(w, active_id=active_id) for w in warrants],
+        "active_warrant_id": active_id,
+        "count": len(warrants),
+    }
+
+
+@app.get("/warrant/{warrant_id}")
+async def get_warrant(warrant_id: str) -> dict[str, Any]:
+    """Grant-level detail for one warrant named by id -- root or delegated.
+
+    The lazy-loaded counterpart to `GET /warrants`: that endpoint lists the fleet
+    cheaply, this answers "show me exactly what this one holds and how much of it
+    is spent" for whichever entry a caller picked.
+    """
+    warrant = STORE.get_warrant(warrant_id)
+    if warrant is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no warrant {warrant_id!r} on this broker (never issued here, "
+            "or issued before a restart of a store that was not this one)",
+        )
+    return {
+        "warrant": warrant.model_dump(mode="json"),
+        "used": STORE.used_list(warrant),
+        "closed": STORE.is_closed(warrant.warrant_id),
+        "live": STORE.is_closed(warrant.warrant_id) is None and warrant.expires_at > time.time(),
     }
 
 
@@ -1088,6 +1199,21 @@ async def call(req: CallRequest, x_warrant: str = Header(default="")) -> JSONRes
     if decision.grant_index is not None:
         STORE.spend(warrant.warrant_id, decision.grant_index)
 
+    # MCP wrap (and any other out-of-process forwarder) asks the broker to decide
+    # without attaching an HTTP credential. The caller performs the real call.
+    if req.authorize_only:
+        state.record(entry)
+        return JSONResponse(
+            status_code=200,
+            content={
+                "ok": True,
+                "authorized": True,
+                "op": req.op,
+                "resource": resource,
+                "reason": decision.reason,
+            },
+        )
+
     status, data = await _forward(op, req.args)
     entry.upstream_status = status
     state.record(entry)
@@ -1095,12 +1221,12 @@ async def call(req: CallRequest, x_warrant: str = Header(default="")) -> JSONRes
 
 
 async def _forward(op, args: dict[str, Any]) -> tuple[int, Any]:
-    """Attach the real credential and forward. The only place UPSTREAM_KEY is used."""
+    """Attach the real credential for this service and forward."""
     path = op.upstream_path(args)
     consumed = {name for name in args if "{" + name + "}" in op.path}
     remaining = {k: v for k, v in args.items() if k not in consumed}
     url = SERVICE_BASE[op.service] + path
-    headers = {"Authorization": f"Bearer {UPSTREAM_KEY}"}
+    headers = {"Authorization": f"Bearer {credential_for(op.service)}"}
 
     try:
         if op.method == "GET":
@@ -1119,8 +1245,19 @@ async def _forward(op, args: dict[str, Any]) -> tuple[int, Any]:
 
 
 @app.get("/audit")
-async def get_audit() -> dict[str, Any]:
-    return {"entries": [e.model_dump(mode="json") for e in STORE.all_audit()]}
+async def get_audit(warrant_id: str | None = None, limit: int | None = None) -> dict[str, Any]:
+    """The audit trail, oldest first. `warrant_id` scopes it to one warrant's history --
+    the same attribution query `Store.audit_for_warrant()` exists for -- so a console
+    can back-fill "everything this agent has done" without pulling the whole log and
+    filtering client-side once the log is large.
+    """
+    if warrant_id:
+        entries = STORE.audit_for_warrant(warrant_id)
+        if limit is not None:
+            entries = entries[-max(0, limit) :]
+    else:
+        entries = STORE.all_audit(limit=limit)
+    return {"entries": [e.model_dump(mode="json") for e in entries]}
 
 
 @app.get("/audit/stream")
@@ -1145,6 +1282,13 @@ async def index():
     if UI_FILE.exists():
         return FileResponse(UI_FILE)
     return JSONResponse({"status": "broker up", "ui": "not built yet"})
+
+
+@app.get("/console")
+async def console():
+    if UI_CONSOLE_FILE.exists():
+        return FileResponse(UI_CONSOLE_FILE)
+    return JSONResponse({"status": "broker up", "console": "not built yet"})
 
 
 @app.get("/healthz")

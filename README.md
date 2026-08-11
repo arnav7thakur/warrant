@@ -71,6 +71,14 @@ Reload the MCP server in Cursor. You should see the wrapped tools; denials show 
 
 **Why this is the product path:** you did not adopt a fake IT desk. You put a warrant under tools you (or your team) already run.
 
+### What that looks like in the console
+
+Same wrap flow as above, against the mock notes MCP: task was **Read note n-1**. The warrant grants only `wrap.notes_get`. A read is allowed; a write is denied before anything reaches the upstream MCP.
+
+![Live console after mint + allow notes_get + deny notes_write](docs/console-workflow.png)
+
+Open `http://127.0.0.1:8100/console` while Cursor (or any MCP client) calls tools — the warrant roster and live decisions update as each call is checked.
+
 ---
 
 ## Also: your own HTTP APIs

@@ -39,6 +39,10 @@ ui/_mock_server.py
 agent/_mock_broker.py
 *_shot*.png
 *.png
+!docs/
+!docs/*.png
+.chrome-shot-profile/
+_capture_workflow.py
 
 # local working notes / internal build contracts — not part of the public surface
 CONTRACTS.md
